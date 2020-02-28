@@ -338,9 +338,13 @@ namespace nodetool
       const boost::program_options::variables_map& vm
     )
   {
+      const bool regtest = command_line::get_arg(vm, cryptonote::arg_regtest_on);
     bool testnet = command_line::get_arg(vm, cryptonote::arg_testnet_on);
     bool stagenet = command_line::get_arg(vm, cryptonote::arg_stagenet_on);
     m_nettype = testnet ? cryptonote::TESTNET : stagenet ? cryptonote::STAGENET : cryptonote::MAINNET;
+    if (regtest) {
+        m_nettype = cryptonote::FAKECHAIN;
+    }
 
     network_zone& public_zone = m_network_zones[epee::net_utils::zone::public_];
     public_zone.m_connect = &public_connect;
@@ -659,6 +663,10 @@ namespace nodetool
     {
       memcpy(&m_network_id, &::config::stagenet::NETWORK_ID, 16);
       full_addrs = get_seed_nodes(cryptonote::STAGENET);
+    }
+    else if (m_nettype == cryptonote::FAKECHAIN) {// fuck, miss regtest net?
+        memcpy(&m_network_id, &::config::testnet::NETWORK_ID, 16);
+        full_addrs = get_seed_nodes(cryptonote::FAKECHAIN);
     }
     else
     {

@@ -497,4 +497,55 @@ private:
   constexpr static float RESIZE_PERCENT = 0.9f;
 };
 
+struct keypair;
+
+// pop miner data and others data
+class ExtraDB
+{
+public:
+    ExtraDB();
+    ~ExtraDB();
+
+    void open(const std::string& filename, const int mdb_flags = 0);
+
+    void close();
+
+    void sync();
+
+    inline void check_open() const;
+
+    bool is_read_only() const;
+
+    std::string get_db_name() const;
+
+    void set_miner_private_key(const crypto::hash& keyhash, const keypair& keypair);
+    bool get_miner_private_key(const crypto::hash& keyhash, keypair& keypair);
+
+    void set_block_biddata(uint64_t blockheight, const BlockBidData& biddata);
+    bool get_block_biddata(uint64_t blockheight, BlockBidData& biddata);
+
+    bool IsOpen() { return m_open; }
+private:
+    MDB_env * m_env;
+
+    MDB_dbi m_pop_miner;
+    MDB_dbi m_biddata;
+
+    std::string m_folder;
+
+    bool m_open;
+
+    mutable boost::recursive_mutex m_lock;
+#if defined(__arm__)
+    // force a value so it can compile with 32-bit ARM
+    constexpr static uint64_t DEFAULT_MAPSIZE = 1LL << 31;
+#else
+#if defined(ENABLE_AUTO_RESIZE)
+    constexpr static uint64_t DEFAULT_MAPSIZE = 1LL << 30;
+#else
+    constexpr static uint64_t DEFAULT_MAPSIZE = 1LL << 33;
+#endif
+#endif
+};
+
 }  // namespace cryptonote

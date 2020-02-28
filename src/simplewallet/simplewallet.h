@@ -89,7 +89,7 @@ namespace cryptonote
 
     bool handle_command_line(const boost::program_options::variables_map& vm);
 
-    bool run_console_handler();
+    //bool run_console_handler();
 
     void wallet_idle_thread();
 
@@ -261,6 +261,7 @@ namespace cryptonote
     bool welcome(const std::vector<std::string>& args);
     bool version(const std::vector<std::string>& args);
     bool on_unknown_command(const std::vector<std::string>& args);
+    bool bid(const std::vector<std::string> &args = std::vector<std::string>());
 
     bool cold_sign_tx(const std::vector<tools::wallet2::pending_tx>& ptx_vector, tools::wallet2::signed_tx_set &exported_txs, std::vector<cryptonote::address_parse_info> &dsts_info, std::function<bool(const tools::wallet2::signed_tx_set &)> accept_func);
     uint64_t get_daemon_blockchain_height(std::string& err);

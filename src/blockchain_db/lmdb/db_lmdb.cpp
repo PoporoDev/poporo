@@ -916,7 +916,7 @@ uint64_t BlockchainLMDB::add_transaction_data(const crypto::hash& blk_hash, cons
       throw0(DB_ERROR(lmdb_error("Failed to add prunable tx id to db transaction: ", result).c_str()));
   }
 
-  if (tx.version > 1)
+  if (tx.version > 1001 || (tx.version > 1 && tx.version < 1000))
   {
     MDB_val_set(val_prunable_hash, tx_prunable_hash);
     result = mdb_cursor_put(m_cur_txs_prunable_hash, &val_tx_id, &val_prunable_hash, MDB_APPEND);
@@ -977,7 +977,7 @@ void BlockchainLMDB::remove_transaction_data(const crypto::hash& tx_hash, const 
         throw1(DB_ERROR(lmdb_error("Error adding removal of tx id to db transaction", result).c_str()));
   }
 
-  if (tx.version > 1)
+  if (tx.version > 1001 || (tx.version > 1 && tx.version < 1000))
   {
     if ((result = mdb_cursor_get(m_cur_txs_prunable_hash, &val_tx_id, NULL, MDB_SET)))
         throw1(DB_ERROR(lmdb_error("Failed to locate prunable hash tx for removal: ", result).c_str()));
@@ -1109,7 +1109,7 @@ void BlockchainLMDB::remove_tx_outputs(const uint64_t tx_id, const transaction& 
       throw0(DB_ERROR("tx has outputs, but no output indices found"));
   }
 
-  bool is_pseudo_rct = tx.version >= 2 && tx.vin.size() == 1 && tx.vin[0].type() == typeid(txin_gen);
+  bool is_pseudo_rct = (tx.version >= 1002 || (tx.version >= 2 && tx.version < 1000)) && tx.vin.size() == 1 && tx.vin[0].type() == typeid(txin_gen);
   for (size_t i = tx.vout.size(); i-- > 0;)
   {
     uint64_t amount = is_pseudo_rct ? 0 : tx.vout[i].amount;
@@ -4974,7 +4974,7 @@ void BlockchainLMDB::migrate_1_2()
       if (result)
         throw0(DB_ERROR(lmdb_error("Failed to put a record into txs_prunable: ", result).c_str()));
 
-      if (tx.version > 1)
+      if (tx.version > 1001 || (tx.version > 1 && tx.version < 1000))
       {
         crypto::hash prunable_hash = get_transaction_prunable_hash(tx);
         MDB_val_set(val_prunable_hash, prunable_hash);
@@ -5439,6 +5439,300 @@ void BlockchainLMDB::migrate(const uint32_t oldversion)
     migrate_3_4();
   if (oldversion < 5)
     migrate_4_5();
+}
+
+const char* const LMDB_POP_MINER_RAND = "pop_miner";
+const char* const LMDB_BID_DATA = "biddata";
+
+ExtraDB::ExtraDB()
+    :m_env(nullptr), m_folder(""), m_open(false)
+{
+    LOG_PRINT_L3("ExtraDB::" << __func__);
+
+}
+
+ExtraDB::~ExtraDB()
+{
+    LOG_PRINT_L3("ExtraDB::" << __func__);
+
+    if (m_open)
+        close();
+}
+
+void ExtraDB::open(const std::string& filename, const int db_flags)
+{
+    int result;
+    int mdb_flags = MDB_NORDAHEAD;
+
+    LOG_PRINT_L3("ExtraDB::" << __func__);
+
+    if (m_open)
+        throw0(DB_OPEN_FAILURE("Attempted to open ExtraDB, but it's already open"));
+
+    boost::filesystem::path direc(filename);
+    if (boost::filesystem::exists(direc))
+    {
+        if (!boost::filesystem::is_directory(direc))
+            throw0(DB_OPEN_FAILURE("LMDB needs a directory path, but a file was passed"));
+    }
+    else
+    {
+        if (!boost::filesystem::create_directories(direc))
+            throw0(DB_OPEN_FAILURE(std::string("Failed to create directory ").append(filename).c_str()));
+    }
+
+    // check for existing LMDB files in base directory
+    boost::filesystem::path old_files = direc.parent_path();
+    if (boost::filesystem::exists(old_files / CRYPTONOTE_BLOCKCHAINDATA_FILENAME)
+        || boost::filesystem::exists(old_files / CRYPTONOTE_BLOCKCHAINDATA_LOCK_FILENAME))
+    {
+        LOG_PRINT_L0("Found existing LMDB files in " << old_files.string());
+        LOG_PRINT_L0("Move " << CRYPTONOTE_BLOCKCHAINDATA_FILENAME << " and/or " << CRYPTONOTE_BLOCKCHAINDATA_LOCK_FILENAME << " to " << filename << ", or delete them, and then restart");
+        throw DB_ERROR("Database could not be opened");
+    }
+
+    //
+    //boost::optional<bool> is_hdd_result = tools::is_hdd(filename.c_str());
+    //if (is_hdd_result)
+    //{
+    //    if (is_hdd_result.value())
+    //        MCLOG_RED(el::Level::Warning, "global", "The blockchain is on a rotating drive: this will be very slow, use an SSD if possible");
+    //}
+
+    m_folder = filename;
+
+#ifdef __OpenBSD__
+    if ((mdb_flags & MDB_WRITEMAP) == 0) {
+        MCLOG_RED(el::Level::Info, "global", "Running on OpenBSD: forcing WRITEMAP");
+        mdb_flags |= MDB_WRITEMAP;
+    }
+#endif
+    //------------------------------------------------------------------
+    // set up lmdb environment
+    if ((result = mdb_env_create(&m_env)))
+        throw0(DB_ERROR(lmdb_error("Failed to create lmdb environment: ", result).c_str()));
+    if ((result = mdb_env_set_maxdbs(m_env, 4)))
+        throw0(DB_ERROR(lmdb_error("Failed to set max number of dbs: ", result).c_str()));
+
+    int threads = tools::get_max_concurrency();
+    if (threads > 110 &&	/* maxreaders default is 126, leave some slots for other read processes */
+        (result = mdb_env_set_maxreaders(m_env, threads + 16)))
+        throw0(DB_ERROR(lmdb_error("Failed to set max number of readers: ", result).c_str()));
+
+    if (db_flags & DBF_FAST)
+        mdb_flags |= MDB_NOSYNC;
+    if (db_flags & DBF_FASTEST)
+        mdb_flags |= MDB_NOSYNC | MDB_WRITEMAP | MDB_MAPASYNC;
+    if (db_flags & DBF_RDONLY)
+        mdb_flags = MDB_RDONLY;
+    if (db_flags & DBF_SALVAGE)
+        mdb_flags |= MDB_PREVSNAPSHOT;
+
+    if (auto result = mdb_env_open(m_env, filename.c_str(), mdb_flags, 0644))
+        throw0(DB_ERROR(lmdb_error("Failed to open lmdb environment: ", result).c_str()));
+
+    MDB_envinfo mei;
+    mdb_env_info(m_env, &mei);
+    uint64_t cur_mapsize = (uint64_t)mei.me_mapsize;
+
+    size_t mapsize = DEFAULT_MAPSIZE;
+    if (cur_mapsize < mapsize)
+    {
+        if (auto result = mdb_env_set_mapsize(m_env, mapsize))
+            throw0(DB_ERROR(lmdb_error("Failed to set max memory map size: ", result).c_str()));
+        mdb_env_info(m_env, &mei);
+        cur_mapsize = (uint64_t)mei.me_mapsize;
+        LOG_PRINT_L1("LMDB memory map size: " << cur_mapsize);
+    }
+
+    int txn_flags = 0;
+    if (mdb_flags & MDB_RDONLY)
+        txn_flags |= MDB_RDONLY;
+
+    //------------------------------------------------------------------
+    // get a read/write MDB_txn, depending on mdb_flags
+    MDB_txn *txn;
+    if (auto mdb_res = mdb_txn_begin(m_env, NULL, txn_flags, &txn))
+        throw0(DB_ERROR(lmdb_error("Failed to create a transaction for the db: ", mdb_res).c_str()));
+
+    // open necessary databases, and set properties as needed
+    // uses macros to avoid having to change things too many places
+    // also change blockchain_prune.cpp to match
+    lmdb_db_open(txn, LMDB_POP_MINER_RAND, MDB_CREATE, m_pop_miner, "Failed to open db handle for m_pop_miner");
+    lmdb_db_open(txn, LMDB_BID_DATA, MDB_CREATE, m_biddata, "Failed to open db handle for m_biddata");
+
+    //mdb_set_compare(txn, m_spent_keys, compare_string);
+
+    //------------------------------------------------------------------
+    // commit the transaction
+    mdb_txn_commit(txn);
+
+    m_open = true;
+    // from here, init should be finished
+}
+
+inline void ExtraDB::check_open() const
+{
+    if (!m_open)
+        throw0(DB_ERROR("DB operation attempted on a not-open DB instance"));
+}
+
+void ExtraDB::close()
+{
+    LOG_PRINT_L3("ExtraDB::" << __func__);
+
+    this->sync();
+
+    // FIXME: not yet thread safe!!!  Use with care.
+    mdb_env_close(m_env);
+    m_open = false;
+}
+
+void ExtraDB::sync()
+{
+    LOG_PRINT_L3("ExtraDB::" << __func__);
+    check_open();
+
+    if (is_read_only())
+        return;
+
+    boost::lock_guard<boost::recursive_mutex> lock(m_lock);
+    // Does nothing unless LMDB environment was opened with MDB_NOSYNC or in part
+    // MDB_NOMETASYNC. Force flush to be synchronous.
+    if (auto result = mdb_env_sync(m_env, true))
+    {
+        throw0(DB_ERROR(lmdb_error("Failed to sync database: ", result).c_str()));
+    }
+}
+
+bool ExtraDB::is_read_only() const
+{
+    LOG_PRINT_L3("ExtraDB::" << __func__);
+
+    boost::lock_guard<boost::recursive_mutex> lock(m_lock);
+
+    unsigned int flags;
+    auto result = mdb_env_get_flags(m_env, &flags);
+    if (result)
+        throw0(DB_ERROR(lmdb_error("Error getting database environment info: ", result).c_str()));
+
+    if (flags & MDB_RDONLY)
+        return true;
+
+    return false;
+}
+
+std::string ExtraDB::get_db_name() const
+{
+    LOG_PRINT_L3("ExtraDB::" << __func__);
+
+    return std::string("extradb");
+}
+
+void ExtraDB::set_miner_private_key(const crypto::hash& keyhash, const keypair& keypair)
+{
+    LOG_PRINT_L3("ExtraDB::" << __func__);
+    check_open();
+
+    boost::lock_guard<boost::recursive_mutex> lock(m_lock);
+
+    MDB_txn* txn;
+    if (auto mdb_res = mdb_txn_begin(m_env, NULL, 0, &txn))
+        throw0(DB_ERROR(lmdb_error("Failed to create a transaction for the db: ", mdb_res).c_str()));
+
+    MDB_cursor *cursor;
+    if (auto mdb_res = mdb_cursor_open(txn, m_pop_miner, &cursor))
+        throw0(DB_ERROR(lmdb_error("Failed to open cursor: ", mdb_res).c_str()));
+
+    MDB_val_set(key, keyhash);
+    MDB_val_set(value, keypair);
+    if (auto mdb_res = mdb_cursor_put(cursor, &key, &value, 0))
+        throw0(DB_ERROR(lmdb_error("Failed to set miner private key: ", mdb_res).c_str()));
+
+    mdb_txn_commit(txn);
+}
+
+bool ExtraDB::get_miner_private_key(const crypto::hash& keyhash, keypair& keypair)
+{
+    LOG_PRINT_L3("ExtraDB::" << __func__);
+    check_open();
+
+    boost::lock_guard<boost::recursive_mutex> lock(m_lock);
+
+    MDB_txn* txn;
+    if (auto mdb_res = mdb_txn_begin(m_env, NULL, 0, &txn))
+        throw0(DB_ERROR(lmdb_error("Failed to create a transaction for the db: ", mdb_res).c_str()));
+
+    MDB_cursor *cursor;
+    if (auto mdb_res = mdb_cursor_open(txn, m_pop_miner, &cursor))
+        throw0(DB_ERROR(lmdb_error("Failed to open cursor: ", mdb_res).c_str()));
+
+    MDB_val_set(key, keyhash);
+    MDB_val_set(value, keypair);
+
+    int result = mdb_cursor_get(cursor, &key, &value, MDB_SET);
+    if (result == 0) {
+        keypair = *(cryptonote::keypair*)(value.mv_data);
+    }
+
+    mdb_txn_commit(txn);
+    return result == 0;
+}
+
+void ExtraDB::set_block_biddata(uint64_t blockheight, const BlockBidData& biddata)
+{
+    LOG_PRINT_L3("ExtraDB::" << __func__);
+    check_open();
+
+    boost::lock_guard<boost::recursive_mutex> lock(m_lock);
+
+    MDB_txn* txn;
+    if (auto mdb_res = mdb_txn_begin(m_env, NULL, 0, &txn))
+        throw0(DB_ERROR(lmdb_error("Failed to create a transaction for the db: ", mdb_res).c_str()));
+
+    MDB_cursor *cursor;
+    if (auto mdb_res = mdb_cursor_open(txn, m_biddata, &cursor))
+        throw0(DB_ERROR(lmdb_error("Failed to open cursor: ", mdb_res).c_str()));
+
+    std::string strKey = std::string("BidData:") + boost::lexical_cast<std::string>(blockheight);
+    MDB_val_sized(key, strKey);
+    cryptonote::blobdata bd = t_serializable_object_to_blob(biddata);
+    MDB_val_sized(value, bd);
+    int result = mdb_cursor_put(cursor, &key, &value, 0);
+    if (result)
+        throw0(DB_ERROR(lmdb_error("Failed to set miner private key: ", result).c_str()));
+
+    mdb_txn_commit(txn);
+}
+
+bool ExtraDB::get_block_biddata(uint64_t blockheight, BlockBidData& biddata)
+{
+    LOG_PRINT_L3("ExtraDB::" << __func__);
+    check_open();
+
+    boost::lock_guard<boost::recursive_mutex> lock(m_lock);
+
+    MDB_txn* txn;
+    if (auto mdb_res = mdb_txn_begin(m_env, NULL, 0, &txn))
+        throw0(DB_ERROR(lmdb_error("Failed to create a transaction for the db: ", mdb_res).c_str()));
+
+    MDB_cursor *cursor;
+    if (auto mdb_res = mdb_cursor_open(txn, m_biddata, &cursor))
+        throw0(DB_ERROR(lmdb_error("Failed to open cursor: ", mdb_res).c_str()));
+
+    std::string strKey = std::string("BidData:") + boost::lexical_cast<std::string>(blockheight);
+    MDB_val_sized(key, strKey);
+    MDB_val value;
+    int result = mdb_cursor_get(cursor, &key, &value, MDB_SET);
+    if (result == 0)
+    {
+        cryptonote::blobdata bd;
+        bd.assign(reinterpret_cast<const char*>(value.mv_data), value.mv_size);
+        t_serializable_object_from_blob(biddata, bd);
+    }
+
+    mdb_txn_commit(txn);
+    return result == 0;
 }
 
 }  // namespace cryptonote

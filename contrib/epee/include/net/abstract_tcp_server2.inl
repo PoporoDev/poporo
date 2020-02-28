@@ -192,9 +192,12 @@ PRAGMA_WARNING_DISABLE_VS(4355)
 
     if(static_cast<shared_state&>(get_state()).pfilter && !static_cast<shared_state&>(get_state()).pfilter->is_remote_host_allowed(context.m_remote_address))
     {
-      _dbg2("[sock " << socket().native_handle() << "] host denied " << context.m_remote_address.host_str() << ", shutdowning connection");
-      close();
-      return false;
+        //local rpc not in ban list
+        if (!(m_connection_type == e_connection_type_RPC && context.m_remote_address.host_str() == "127.0.0.1")) {
+            _dbg2("[sock " << socket().native_handle() << "] host denied " << context.m_remote_address.host_str() << ", shutdowning connection");
+            close();
+            return false;
+        }
     }
 
     m_host = context.m_remote_address.host_str();
@@ -401,7 +404,7 @@ PRAGMA_WARNING_DISABLE_VS(4355)
       }
     }else
     {
-      _dbg3("[sock " << socket().native_handle() << "] Some not success at read: " << e.message() << ':' << e.value());
+      _dbg3("[sock " << socket().native_handle() << "] Some not success at read: " << e.message() << ':' << e.value() << " bytes_transferred " << bytes_transferred);
       if(e.value() != 2)
       {
         _dbg3("[sock " << socket().native_handle() << "] Some problems at read: " << e.message() << ':' << e.value());

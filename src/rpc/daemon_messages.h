@@ -185,6 +185,7 @@ BEGIN_RPC_MESSAGE_CLASS(StartMining);
     RPC_MESSAGE_MEMBER(uint64_t, threads_count);
     RPC_MESSAGE_MEMBER(bool, do_background_mining);
     RPC_MESSAGE_MEMBER(bool, ignore_battery);
+    RPC_MESSAGE_MEMBER(std::string, miner_sec_key);
   END_RPC_MESSAGE_REQUEST;
   BEGIN_RPC_MESSAGE_RESPONSE;
   END_RPC_MESSAGE_RESPONSE;

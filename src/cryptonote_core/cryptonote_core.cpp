@@ -53,6 +53,8 @@ using namespace epee;
 #include "common/notify.h"
 #include "hardforks/hardforks.h"
 #include "version.h"
+#include "blockchain_db/lmdb/db_lmdb.h"
+#include "storages/http_abstract_invoke.h"
 
 #undef MONERO_DEFAULT_LOG_CATEGORY
 #define MONERO_DEFAULT_LOG_CATEGORY "cn"
@@ -66,8 +68,38 @@ DISABLE_VS_WARNINGS(4355)
 // basically at least how many bytes the block itself serializes to without the miner tx
 #define BLOCK_SIZE_SANITY_LEEWAY 100
 
+static const uint32_t BTC_BLOCK_HASH_COUNT = 10;
+
 namespace cryptonote
 {
+    //pop-mining
+    //--------------------------------------------------------------------------
+    // give a ltc block height, return the btc block height, which can the the bid data to mining the ltc block
+    uint64_t core::GetBidBtcBlockHeight(uint64_t iXmrBlockHeight) const
+    {
+        const uint64_t iBtcBlockStart = BTC_BID_START() + 1;
+        const uint64_t iXmrBlockStart = POP_FORK_HEIGHT();
+        uint64_t iRet = (iXmrBlockHeight - iXmrBlockStart) / BTC_TO_XMR_BLOCK_TIMES + iBtcBlockStart;
+        return iRet;
+    }
+
+    uint64_t core::GetXmrBlockHeightFromBidHeight(uint64_t iBidBtcHeight) const
+    {
+        uint64_t iBidRun = iBidBtcHeight - BTC_BID_START() - 1;
+        uint64_t iXmrHeight = XMR_BID_START() + iBidRun * BTC_TO_XMR_BLOCK_TIMES;
+        return iXmrHeight;
+    }
+
+    //Only Support P2PKH or P2PK address
+    std::string GetBidAddress(uint64_t iBtcBlockHeight, bool bRegtest)
+    {
+        const std::string strBidAddress = !bRegtest ? 
+            "3CHWBNWzh8RhgHFHFtAo6ZzyDD9aBAABcN" : // main net BTC address
+            "myV5V3oQWJgzzxwp5suwSJM7HgU1zfsmRj"; // testnet BTC address
+        return strBidAddress;
+    }
+    //--------------------------------------------------------------------------
+
   const command_line::arg_descriptor<bool, false> arg_testnet_on  = {
     "testnet"
   , "Run on testnet. The wallet must be launched with --testnet flag."
@@ -117,6 +149,24 @@ namespace cryptonote
   const command_line::arg_descriptor<bool> arg_sync_pruned_blocks  = {
     "sync-pruned-blocks"
   , "Allow syncing from nodes with only pruned blocks"
+  };
+
+  const command_line::arg_descriptor<uint64_t> arg_popforkheight = {
+      "popforkheight"
+      , "Pop for height, for regtest"
+      , 0
+  };
+
+  const command_line::arg_descriptor<uint32_t> arg_btcbidstart = {
+      "btcbidstart"
+      , "BTC bid start, for regtest"
+      , 0
+  };
+
+  const command_line::arg_descriptor<int64_t> arg_mocktime = {
+      "mocktime"
+      , "mock time for regtest"
+      , 0
   };
 
   static const command_line::arg_descriptor<bool> arg_test_drop_download = {
@@ -219,6 +269,32 @@ namespace cryptonote
   , false
   };
 
+  inline uint64_t ReadLE64(const uint8_t *ptr) {
+      uint64_t x;
+      memcpy((char *)&x, ptr, 8);
+      return (x);
+  }
+  struct BidHashCompare {
+      crypto::hash m_hash;
+      bool operator()(const BidData& a, const BidData& b) const
+      {
+          crypto::hash h1 = a.hash3;
+          crypto::hash h2 = b.hash3;
+          unsigned char* szH1 = (unsigned char*)&h1.data[0];
+          unsigned char* szH2 = (unsigned char*)&h2.data[0];
+          const unsigned char* szH = (const unsigned char*)&m_hash.data[0];
+          for (int i = 0; i < 32; ++i) {
+              *szH1 = *szH1 ^ *szH;
+              *szH2 = *szH2 ^ *szH;
+              szH++;
+              szH1++;
+              szH2++;
+          }
+          return ReadLE64((const uint8_t*)h1.data) > ReadLE64((const uint8_t*)h2.data);
+      }
+      BidHashCompare(const crypto::hash& h) : m_hash(h) {}
+  };
+
   //-----------------------------------------------------------------------------------------------
   core::core(i_cryptonote_protocol* pprotocol):
               m_mempool(m_blockchain_storage),
@@ -235,11 +311,21 @@ namespace cryptonote
               m_update_download(0),
               m_nettype(UNDEFINED),
               m_update_available(false),
-              m_pad_transactions(false)
+              m_pad_transactions(false),
+              m_pExtraDb(nullptr),
+              m_p_btc_http_client(nullptr),
+              m_p_btc_rpc_cli_mutex(nullptr)
   {
     m_checkpoints_updating.clear();
     set_cryptonote_protocol(pprotocol);
   }
+    core::~core()
+    {
+        if (m_pExtraDb)
+            delete m_pExtraDb;
+        m_pExtraDb = nullptr;
+    }
+
   void core::set_cryptonote_protocol(i_cryptonote_protocol* pprotocol)
   {
     if(pprotocol)
@@ -338,6 +424,10 @@ namespace cryptonote
     command_line::add_arg(desc, arg_reorg_notify);
     command_line::add_arg(desc, arg_block_rate_notify);
     command_line::add_arg(desc, arg_keep_alt_blocks);
+
+    command_line::add_arg(desc, arg_popforkheight);
+    command_line::add_arg(desc, arg_btcbidstart);
+    command_line::add_arg(desc, arg_mocktime);
 
     miner::init_options(desc);
     BlockchainDB::init_options(desc);
@@ -454,11 +544,20 @@ namespace cryptonote
   {
     start_time = std::time(nullptr);
 
+    m_ipopforkheight = 0;
+    m_ibtcbidstart = 0;
+
     const bool regtest = command_line::get_arg(vm, arg_regtest_on);
-    if (test_options != NULL || regtest)
-    {
+    m_isRegtest = regtest;
+    if (test_options != NULL || regtest) {
       m_nettype = FAKECHAIN;
     }
+    if (regtest) {
+        m_ipopforkheight = command_line::get_arg(vm, arg_popforkheight);
+        m_ibtcbidstart = command_line::get_arg(vm, arg_btcbidstart);
+        tools::SetMockTime(command_line::get_arg(vm, arg_mocktime));
+    }
+
     bool r = handle_command_line(vm);
     CHECK_AND_ASSERT_MES(r, false, "Failed to handle command line");
 
@@ -502,6 +601,7 @@ namespace cryptonote
       return false;
     }
 
+    boost::filesystem::path rootfolder = folder;
     folder /= db->get_db_name();
     MGINFO("Loading blockchain from folder " << folder.string() << " ...");
 
@@ -608,6 +708,19 @@ namespace cryptonote
       return false;
     }
 
+    m_pExtraDb = new ExtraDB();
+    try {
+        boost::filesystem::path dbfolder = rootfolder / m_pExtraDb->get_db_name();
+        m_pExtraDb->open(dbfolder.string());
+        if (!m_pExtraDb->IsOpen())
+            return false;
+    }
+    catch (const DB_ERROR& e)
+    {
+        LOG_ERROR("Error opening database: " << e.what());
+        return false;
+    }
+
     m_blockchain_storage.set_user_options(blocks_threads,
         sync_on_blocks, sync_threshold, sync_mode, fast_sync);
 
@@ -641,7 +754,22 @@ namespace cryptonote
       MERROR("Failed to parse block rate notify spec: " << e.what());
     }
 
-    const std::pair<uint8_t, uint64_t> regtest_hard_forks[3] = {std::make_pair(1, 0), std::make_pair(mainnet_hard_forks[num_mainnet_hard_forks-1].version, 1), std::make_pair(0, 0)};
+    //const std::pair<uint8_t, uint64_t> regtest_hard_forks[3] = {std::make_pair(1, 0), std::make_pair(mainnet_hard_forks[num_mainnet_hard_forks-1].version, 1), std::make_pair(0, 0)};
+    const uint64_t test_pos_fork_height = m_ipopforkheight > 0 ? m_ipopforkheight : 1000;
+    std::pair<uint8_t, uint64_t> regtest_hard_forks[5] = { std::make_pair(1, 0),
+        std::make_pair(HF_VERSION_SMALLER_BP, 1), //TODO: for check_tx_outputs: from v11, allow only bulletproofs v2
+        std::make_pair(mainnet_hard_forks[num_mainnet_hard_forks - 1].version, 21),
+        std::make_pair(0, 0), //placeholder
+        std::make_pair(0, 0) };
+    //TODO:for regtest, may be can remove later.
+    if (regtest_hard_forks[2].first > HF_VERSION_POP_CONSENSUS) {
+        regtest_hard_forks[3] = std::make_pair(mainnet_hard_forks[num_mainnet_hard_forks - 1].version, test_pos_fork_height + 20); //move back
+        regtest_hard_forks[2] = std::make_pair(HF_VERSION_POP_CONSENSUS, test_pos_fork_height);
+    }
+    else if (regtest_hard_forks[2].first == HF_VERSION_POP_CONSENSUS) {
+        regtest_hard_forks[2].second = test_pos_fork_height;
+    }
+
     const cryptonote::test_options regtest_test_options = {
       regtest_hard_forks,
       0
@@ -805,13 +933,15 @@ namespace cryptonote
     bad_semantics_txes_lock.unlock();
 
     uint8_t version = m_blockchain_storage.get_current_hard_fork_version();
-    const size_t max_tx_version = version == 1 ? 1 : 2;
+    const size_t max_tx_version = version == 1 ? 1 : (version < HF_VERSION_POP_CONSENSUS ? 2 : 1002);
     if (tx.version == 0 || tx.version > max_tx_version)
     {
-      // v2 is the latest one we know
-      MERROR_VER("Bad tx version (" << tx.version << ", max is " << max_tx_version << ")");
-      tvc.m_verifivation_failed = true;
-      return false;
+        if (tx.version != 1001 && tx.version != 1002) {
+            // v2 is the latest one we know
+            MERROR_VER("Bad tx version (" << tx.version << ", max is " << max_tx_version << ")");
+            tvc.m_verifivation_failed = true;
+            return false;
+        }
     }
 
     return true;
@@ -872,7 +1002,7 @@ namespace cryptonote
         continue;
       }
 
-      if (tx_info[n].tx->version < 2)
+      if ((tx_info[n].tx->version > 1000 && tx_info[n].tx->version < 1002) || tx_info[n].tx->version < 2)
         continue;
       const rct::rctSig &rv = tx_info[n].tx->rct_signatures;
       switch (rv.type) {
@@ -1089,7 +1219,7 @@ namespace cryptonote
       MERROR_VER("tx with invalid outputs, rejected for tx id= " << get_transaction_hash(tx));
       return false;
     }
-    if (tx.version > 1)
+    if (tx.version > 1001 || (tx.version > 1 && tx.version < 1000))
     {
       if (tx.rct_signatures.outPk.size() != tx.vout.size())
       {
@@ -1104,7 +1234,7 @@ namespace cryptonote
       return false;
     }
 
-    if (tx.version == 1)
+    if (tx.version == 1001 || tx.version == 1)
     {
       uint64_t amount_in = 0;
       get_inputs_money_amount(tx, amount_in);
@@ -1311,14 +1441,14 @@ namespace cryptonote
     m_mempool.set_relayed(txs);
   }
   //-----------------------------------------------------------------------------------------------
-  bool core::get_block_template(block& b, const account_public_address& adr, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce)
+  bool core::get_block_template(block& b, const account_public_address& adr, const crypto::secret_key& sec_key, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce)
   {
-    return m_blockchain_storage.create_block_template(b, adr, diffic, height, expected_reward, ex_nonce);
+    return m_blockchain_storage.create_block_template(b, adr, sec_key, diffic, height, expected_reward, ex_nonce, std::bind(&core::SignBlock, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
   }
   //-----------------------------------------------------------------------------------------------
-  bool core::get_block_template(block& b, const crypto::hash *prev_block, const account_public_address& adr, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce)
+  bool core::get_block_template(block& b, const crypto::hash *prev_block, const account_public_address& adr, const crypto::secret_key& sec_key, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce)
   {
-    return m_blockchain_storage.create_block_template(b, prev_block, adr, diffic, height, expected_reward, ex_nonce);
+    return m_blockchain_storage.create_block_template(b, prev_block, adr, sec_key, diffic, height, expected_reward, ex_nonce, std::bind(&core::SignBlock, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
   }
   //-----------------------------------------------------------------------------------------------
   bool core::find_blockchain_supplement(const std::list<crypto::hash>& qblock_ids, bool clip_pruned, NOTIFY_RESPONSE_CHAIN_ENTRY::request& resp) const
@@ -1396,7 +1526,7 @@ namespace cryptonote
       m_miner.resume();
       return false;
     }
-    m_blockchain_storage.add_new_block(b, bvc);
+    add_new_block(b, bvc);
     cleanup_handle_incoming_blocks(true);
     //anyway - update miner template
     update_miner_block_template();
@@ -1442,6 +1572,11 @@ namespace cryptonote
   //-----------------------------------------------------------------------------------------------
   bool core::add_new_block(const block& b, block_verification_context& bvc)
   {
+      if (!CheckPopMining(b)) {
+          MERROR("CheckPopMining fail");
+          bvc.m_verifivation_failed = true;
+          return false;
+      }
     return m_blockchain_storage.add_new_block(b, bvc);
   }
 
@@ -1884,7 +2019,7 @@ namespace cryptonote
 
     static constexpr double threshold = 1. / (864000 / DIFFICULTY_TARGET_V2); // one false positive every 10 days
 
-    const time_t now = time(NULL);
+    const time_t now = tools::GetTime();
     const std::vector<time_t> timestamps = m_blockchain_storage.get_last_block_timestamps(60);
 
     static const unsigned int seconds[] = { 5400, 3600, 1800, 1200, 600 };
@@ -1981,5 +2116,587 @@ namespace cryptonote
   void core::graceful_exit()
   {
     raise(SIGTERM);
+  }
+
+  //-----------------------------------------------------------------------------------------------
+  // get biddata from rpc or local db cache.
+  bool core::GetBidData(uint64_t iBtcHeight, BlockBidData& kBlockBid)
+  {
+      LOG_PRINT_L3("core::" << __func__);
+      {
+          //LOCK(cs_main);
+          if (m_pExtraDb->get_block_biddata(iBtcHeight, kBlockBid)) {
+              //MGINFO("get_block_biddata from db ok, iBtcHeight:" << iBtcHeight);
+              return true;
+          }
+      }
+
+      const std::string strBidAddress = GetBidAddress(iBtcHeight, IsRegtest());
+      try {
+          std::vector<std::string> vecParams;
+          vecParams.push_back(std::to_string(iBtcHeight));
+          vecParams.push_back(std::string("\"") + strBidAddress + "\"");
+          vecParams.push_back(std::to_string(BTC_BLOCK_HASH_COUNT)); //btc block head hash count
+
+          const std::string strMethod = "getbid";
+          std::string strUri = "/"; // may be wallet name
+          epee::net_utils::http::http_response_info response_info;
+
+          bool ret = false;
+          {
+              boost::lock_guard<boost::recursive_mutex> lock(*m_p_btc_rpc_cli_mutex);
+              ret = epee::net_utils::invoke_btc_rpc(strUri, strMethod, vecParams, *m_p_btc_http_client, m_str_rpc_login, response_info);
+          }
+
+          //MGINFO("getbid m_body:" << response_info.m_body);
+          btc_rpc_return_msg btc_rpc_ret;
+          if (response_info.m_body.find("{\"result\":null,\"error\":{\"code\":") != std::string::npos) //to avoid load json exception
+              epee::serialization::load_t_from_json(btc_rpc_ret, response_info.m_body);
+
+          if (ret && btc_rpc_ret.error.message.empty()) {
+              btc_getbid_data getbid_data;
+              epee::serialization::load_t_from_json(getbid_data, response_info.m_body);
+
+              for (size_t i = 0; i < getbid_data.result.bids.size(); i++)
+              {
+                  BidData kData;
+                  kData.nAmount = getbid_data.result.bids[i].amount;
+                  std::vector<std::string>& hashList = getbid_data.result.bids[i].hashs;
+                  if (hashList.size() > 0) {
+                      string_tools::hex_to_pod(hashList[0], kData.hash1);
+                  }
+                  if (hashList.size() > 1) {
+                      string_tools::hex_to_pod(hashList[1], kData.hash2);
+                  }
+                  if (hashList.size() > 2) {
+                      string_tools::hex_to_pod(hashList[2], kData.hash3);
+                  }
+                  //if (hashList.size() > 3) {
+                  //    string_tools::hex_to_pod(hashList[3], kData.hash4);
+                  //}
+
+                  string_tools::hex_to_pod(string_tools::pod_to_hex(kData.hash1), kData.kAddr);
+
+                  kBlockBid.bids.push_back(kData);
+              }
+              for (size_t i = 0; i < getbid_data.result.hashes.size(); i++)
+              {
+                  crypto::hash hash;
+                  string_tools::hex_to_pod(getbid_data.result.hashes[i], hash);
+                  kBlockBid.hashs.push_back(hash);
+              }
+              kBlockBid.blockTime = getbid_data.result.time;
+
+          }
+          else {
+              MERROR("GetBidData fail:" << std::string("bitcoin gitbid rpc error msg:") + btc_rpc_ret.error.message << " iBtcHeight " << iBtcHeight);
+              return false;
+          }
+
+          if (kBlockBid.blockTime > 0)
+          {
+              //LOCK(cs_main);
+              m_pExtraDb->set_block_biddata(iBtcHeight, kBlockBid);
+              //MGINFO("set_block_biddata, iBtcHeight:" << iBtcHeight);
+          }
+
+      }
+      catch (const std::exception& e) {// rpc exception
+          MERROR("GetBidData fail:" << e.what());
+          return false;
+      }
+      return true;
+  }
+
+#define BTC_COIN ((int64_t)100000000);
+  bool core::CollectBidData(const cryptonote::block& bl, uint64_t iXmrBlockHeight, std::vector<BidData>& vec, std::vector<crypto::hash>& vecBlockHash, size_t iSize)
+  {
+      LOG_PRINT_L3("core::" << __func__);
+
+      typedef std::map<crypto::hash, BidData> BidMap;
+      BidMap mapBid;
+      const uint64_t iBtcBlockHeight = GetBidBtcBlockHeight(iXmrBlockHeight);
+      BlockBidData kBlockBid;
+      std::vector<BidData>& vecBids = kBlockBid.bids;
+      const int64_t iSearchHeight = 120;
+
+      for (uint64_t i = iBtcBlockHeight; i >= BTC_BID_START(); --i) {
+          vecBids.clear();
+          kBlockBid.hashs.clear();
+          GetBidData(i, kBlockBid);
+          if (i == iBtcBlockHeight) {
+              vecBlockHash = kBlockBid.hashs;
+              if (vecBlockHash.size() != BTC_BLOCK_HASH_COUNT) {
+                  MERROR("btc block hash vector size not satisfy: iXmrBlockHeight=" << iXmrBlockHeight << ", iBtcBlockHeight=" << iBtcBlockHeight << " size " << vecBlockHash.size());
+              }
+          }
+          std::stable_sort(vecBids.begin(), vecBids.end(), [](const BidData& v1, const BidData& v2) {
+              return v1.nAmount > v2.nAmount;
+          });
+          for (std::vector<BidData>::iterator vit = vecBids.begin(); vit != vecBids.end(); ++vit) {
+              BidData& kBid = *vit;
+
+              kBid.nWeights = (int64_t)kBid.nAmount + (iSearchHeight - (int64_t)i) * 10 * BTC_COIN;
+
+              uint64_t iXmrBidHeight = GetXmrBlockHeightFromBidHeight(i);
+              uint64_t iCheckTimes = iXmrBlockHeight - iXmrBidHeight + 60; // 60 means block can record the bid before two hours
+              cryptonote::block testBlock;
+              uint64_t nTestBlockHeight = 0;
+              if (get_block_by_hash(kBid.hash2, testBlock))
+              {
+                  nTestBlockHeight = get_block_height(testBlock);
+                  if (nTestBlockHeight > iXmrBidHeight + 12)
+                      iCheckTimes = 0;
+                  if (nTestBlockHeight < iXmrBidHeight - 60)
+                      iCheckTimes = 0;
+              }
+              // The coin head hash must in the check times
+
+              //if (CheckPrevBlock(bl, kBid.hash2, iCheckTimes))
+              MDEBUG("lucky i " << i << " iXmrBidHeight " << iXmrBidHeight << " iXmrBlockHeight " << iXmrBlockHeight << " iCheckTimes " << iCheckTimes << " nTestBlockHeight " << nTestBlockHeight);
+              if (nTestBlockHeight && iCheckTimes && get_block_id_by_height(nTestBlockHeight) == kBid.hash2)
+              {
+                  if (mapBid.find(kBid.hash1) != mapBid.end()) {
+                      BidData& kOrg = mapBid[kBid.hash1];
+                      if (kOrg.nAmount < kBid.nAmount)
+                          kOrg = kBid;
+                  }
+                  else {
+                      mapBid[kBid.hash1] = kBid;
+                  }
+                  //vec.push_back(kBid);
+                  if (mapBid.size() >= iSize) { // NOTE: in my test case, only two miner address bid, so for loop will run to BTC_BID_START.
+                      for (BidMap::iterator mit = mapBid.begin(); mit != mapBid.end(); ++mit) {
+                          vec.push_back(mit->second);
+                      }
+                      return true;
+                  }
+              }
+          }
+          if (iBtcBlockHeight - i >= iSearchHeight && mapBid.size() > 0) {
+              for (BidMap::iterator mit = mapBid.begin(); mit != mapBid.end(); ++mit) {
+                  vec.push_back(mit->second);
+              }
+              return false;
+          }
+      }
+      for (BidMap::iterator mit = mapBid.begin(); mit != mapBid.end(); ++mit) {
+          vec.push_back(mit->second);
+      }
+      return false;
+  }
+
+  void core::CollectBidAddresses(const cryptonote::block& bl, uint64_t iXmrBlockHeight, std::vector<BidData>& vecRet, int iAddrSize)
+  {
+      LOG_PRINT_L3("core::" << __func__);
+      std::vector<BidData> vecBid;
+      std::vector<crypto::hash> vecHash;
+      CollectBidData(bl, iXmrBlockHeight, vecBid, vecHash, iAddrSize);
+
+      // sort miners by bid amount
+      struct {
+          bool operator()(const BidData& a, const BidData& b) const
+          {
+              return a.nWeights > b.nWeights;
+          }
+      } AmountCompare;
+
+      std::stable_sort(vecBid.begin(), vecBid.end(), AmountCompare);
+
+      vecRet.clear();
+      if (vecBid.size() <= 4) {
+          vecRet = vecBid;
+      }
+      else
+      {
+          // if the miner size > 4, then the first miners are the max bid, and the 4th is the second bid, others is randomized
+          vecRet.push_back(vecBid[0]);
+          vecRet.push_back(vecBid[3]);
+
+          vecBid.erase(vecBid.begin() + 3);
+          vecBid.erase(vecBid.begin());
+
+
+          // write block secret
+          std::string hashWriter;
+
+          uint64_t nHeight = get_block_height(bl);
+          // 12 hours
+          cryptonote::block randBlock = bl;
+          const int iSeedNumber = 5;
+          if (nHeight - POP_FORK_HEIGHT() > BLOCK_FOR_RAND_SEED) {
+              for (uint32_t i = 0; i < BLOCK_FOR_RAND_SEED - iSeedNumber; ++i) {
+                  const crypto::hash& prev_id = randBlock.prev_id;
+                  m_blockchain_storage.get_block_by_hash(prev_id, randBlock);
+              }
+              for (int i = 0; i < iSeedNumber; ++i) {
+                  hashWriter += std::string((const char *)&randBlock.vecSecret, sizeof(crypto::secret_key));
+                  const crypto::hash& prev_id = randBlock.prev_id;
+                  m_blockchain_storage.get_block_by_hash(prev_id, randBlock);
+              }
+          }
+
+          // write BTC block hash
+          for (size_t i = 0; i < vecHash.size(); ++i) {
+              hashWriter += std::string((const char *)&vecHash[i], sizeof(crypto::hash));
+          }
+
+          crypto::hash seed = crypto::cn_fast_hash(hashWriter.data(), hashWriter.size());
+          BidHashCompare hcmp(seed);
+          std::sort(vecBid.begin(), vecBid.end(), hcmp);
+
+          for (size_t i = 0; i < vecBid.size(); ++i) {
+              vecRet.push_back(vecBid[i]);
+          }
+      }
+  }
+
+  int core::CheckPrevBlock(const cryptonote::block& bl, const crypto::hash& prevHash, int iCheckTimes)
+  {
+      LOG_PRINT_L3("core::" << __func__);
+      cryptonote::block prebl = bl;
+      int iDeep = 1;
+      for (int i = 0; i < iCheckTimes; ++i, ++iDeep)
+      {
+          crypto::hash blhash;
+          get_block_hash(prebl, blhash);//init hash...
+          if (prebl.hash == prevHash) {
+              return iDeep;
+          }
+
+          const crypto::hash& prev_id = prebl.prev_id;
+          if (!m_blockchain_storage.get_block_by_hash(prev_id, prebl))
+              break;
+      }
+
+      MERROR("CheckPrevBlock fail iDeep:" << iDeep << "prevHash" << epee::string_tools::pod_to_hex(prevHash););
+      return 0;
+  }
+
+  void core::GetBidAddresses(const cryptonote::block &bl, uint64_t iXmrBlockHeight, std::vector<BidData>& vecRet, int iAddrSize, uint64_t nTime)
+  {
+      LOG_PRINT_L3("core::" << __func__);
+      CollectBidAddresses(bl, iXmrBlockHeight, vecRet, iAddrSize);
+      RearrangeAddressesQueue(bl, iXmrBlockHeight, vecRet);
+      StripMinerAddresses(bl, nTime, vecRet);
+  }
+
+  void core::RearrangeAddressesQueue(const cryptonote::block& bl, uint64_t iXmrBlockHeight, std::vector<BidData>& vecRet)
+  {
+      LOG_PRINT_L3("core::" << __func__);
+      // erase last miners
+      // times
+      uint64_t iSeq = (iXmrBlockHeight - POP_FORK_HEIGHT() - 1) % BTC_TO_XMR_BLOCK_TIMES;
+      if (iSeq > 0) {
+          // shift the next miner to mining
+          for (size_t i = 0; i < vecRet.size(); ++i) {
+              BidData& kData = vecRet[i];
+              if (kData.kAddr == bl.minerAddr) { //contain last miner address
+                  std::vector<BidData> vecTmp;
+                  std::vector<size_t> moveback; //move back index
+                  for (int k = 0; k < vecRet.size(); ++k) {
+                      if (vecRet[k].kAddr != bl.minerAddr)
+                          vecTmp.push_back(vecRet[k]);
+                      else
+                          moveback.push_back(k);
+                  }
+                  for (auto j : moveback) {
+                      vecTmp.push_back(vecRet[j]);
+                  }
+                  vecRet = vecTmp;
+                  break;
+              }
+          }
+      }
+  }
+
+  void core::StripMinerAddresses(const cryptonote::block& preblock, uint64_t nTime, std::vector<BidData>& vecAddr)
+  {
+      LOG_PRINT_L3("core::" << __func__);
+      int64_t iAddrSize = 1;
+      int64_t iRunTime = nTime - preblock.timestamp;
+      int64_t iTimeSpan = 120; // xmr block time target DIFFICULTY_TARGET_V2 120 seconds.
+      int64_t iTimeGate = 30;
+
+      uint64_t nPreHeight = get_block_height(preblock);
+      uint64_t nHeight = nPreHeight + 1; //this block height
+      uint64_t iBtcBlockHeight = GetBidBtcBlockHeight(nHeight);
+      BlockBidData kBidData1, kBidData2;
+      if (!GetBidData(iBtcBlockHeight, kBidData1) || !GetBidData(iBtcBlockHeight - 1, kBidData2)) {
+          vecAddr.clear();
+          LOG_PRINT_L2("" << __func__ << " GetBidData fail. iBtcBlockHeight = " << iBtcBlockHeight << " nHeight = " << nHeight);
+          return;
+      }
+
+      //XMR must not mine too fast, you must control yourself.
+      uint64_t btcRelateTime = kBidData1.blockTime + BID_WAIT * DIFFICULTY_TARGET_V2;
+      if (nTime < btcRelateTime - 3600 * 2) {
+          vecAddr.resize(0);
+          MERROR(__func__ << " mining too fast, pls slowdown nTime " << nTime << " btctime " << (btcRelateTime - 3600 * 2));
+          return;
+      }
+
+      int64_t btcDeltaTime = kBidData1.blockTime - kBidData2.blockTime; // need generate BTC_TO_XMR_BLOCK_TIMES block in this time interval.
+      btcDeltaTime -= BTC_TO_XMR_BLOCK_TIMES; // TODO: need fix delay between fork coin and btc? because delay can be accumulation
+      if (btcDeltaTime < 0)
+          btcDeltaTime = 0;
+
+      iTimeSpan = std::max(int64_t(0), btcDeltaTime / BTC_TO_XMR_BLOCK_TIMES);
+      // pre brother block take lots time and follow block can rise speed
+      uint64_t preBrothersNum = (nHeight - POP_FORK_HEIGHT()) % BTC_TO_XMR_BLOCK_TIMES;
+      if (preBrothersNum > 0 && iTimeSpan > 0) {
+          uint64_t timeHeight = nHeight - preBrothersNum - 1;
+          crypto::hash timeBlockId = get_block_id_by_height(timeHeight);
+          cryptonote::block timeBlock;
+          if (m_blockchain_storage.get_block_by_hash(timeBlockId, timeBlock)) {
+              int64_t passTimeForBtcBidBlock = preblock.timestamp - timeBlock.timestamp;
+              if (btcDeltaTime > passTimeForBtcBidBlock) {
+                  int64_t lefttime = btcDeltaTime - passTimeForBtcBidBlock;
+                  int64_t newSpenTime = lefttime / (BTC_TO_XMR_BLOCK_TIMES - (int64_t)preBrothersNum); //lefttime/leftblocknumber
+                  MDEBUG("lucky newSpenTime " << newSpenTime << " iTimeSpan " << iTimeSpan);
+                  iTimeSpan = std::min(iTimeSpan, newSpenTime);
+              }
+              else {
+                  iTimeSpan = 0;
+              }
+          }
+      }
+
+      if (iRunTime >= iTimeSpan) {
+          iAddrSize = (iRunTime - iTimeGate) / iTimeGate + 1;
+      }
+      else {
+          iAddrSize = 0;
+          LOG_PRINT_L1(__func__ << " iAddrSize = 0" << ", iRunTime " << iRunTime);
+      }
+
+      //LOG_PRINT_L1(__func__ << " end iAddrSize " << iAddrSize << " vecAddr.size() " << vecAddr.size() << ", iRunTime " << iRunTime);
+      if (iAddrSize >= 0 && vecAddr.size() > (size_t)iAddrSize)
+          vecAddr.resize(iAddrSize);
+  }
+
+  bool core::GetPopMinerAddress(BidData& kBid, crypto::secret_key& kPKey, const cryptonote::block& blPrev, uint64_t iBlockHeight, uint64_t nTime, const account_public_address& miner_adr)
+  {
+      LOG_PRINT_L3("core::" << __func__);
+      memset(&kPKey, 0, sizeof(crypto::secret_key));
+
+      std::vector<BidData> vecAddr;
+      GetBidAddresses(blPrev, iBlockHeight, vecAddr, MINER_SIZE_FOR_POP, nTime);
+      for (size_t i = 0; i < vecAddr.size(); ++i)
+      {
+          if (vecAddr[i].kAddr == miner_adr.m_view_public_key)
+          {
+              kBid = vecAddr[i];
+              {
+                  cryptonote::keypair tempkp;
+                  if (!m_pExtraDb->get_miner_private_key(kBid.hash3, tempkp)) {
+                      continue;
+                  }
+                  kPKey = tempkp.sec;
+                  return true;
+              }
+          }
+      }
+      return false;
+  }
+
+  //
+  bool core::CheckHeaderForPop(const cryptonote::block& block)
+  {
+      LOG_PRINT_L3("core::" << __func__);
+      if (block.prev_id == crypto::null_hash) {
+          return true;
+      }
+
+      //crypto::hash prev_id = randBlock.prev_id;
+      //m_blockchain_storage.get_block_by_hash(prev_id, randBlock);
+
+      uint64_t iBlockHeight = 0;
+      // block height check
+      cryptonote::block prevBlock;
+      {
+          crypto::hash prev_id = block.prev_id;
+          if (!m_blockchain_storage.get_block_by_hash(prev_id, prevBlock)) {
+              MERROR("" << __func__ << " get prev block hash fail");
+              return false;
+          }
+          uint64_t nHeight = get_block_height(prevBlock);
+          if (nHeight < POP_FORK_HEIGHT()) {
+              return true;
+          }
+          iBlockHeight = nHeight + 1;
+      }
+      // check work
+      if (block.major_version < HF_VERSION_POP_CONSENSUS) {//check version
+          MERROR("" << __func__ << " block.major_version error");
+          return false;
+      }
+
+      std::vector<BidData> vecAddr;
+      GetBidAddresses(prevBlock, iBlockHeight, vecAddr, MINER_SIZE_FOR_POP, block.timestamp);
+      for (size_t i = 0; i < vecAddr.size(); ++i) {
+          const BidData& kBid = vecAddr[i];
+          if (kBid.kAddr == block.minerAddr) {
+              if (!CheckBlockHeaderSignature(block)) {
+                  MERROR("" << __func__ << " CheckBlockHeaderSignature fail");
+                  return false;
+              }
+
+              crypto::hash privkeyhash;
+              bool bhash = cryptonote::get_object_hash<crypto::secret_key>(block.vecSecret, privkeyhash);
+              crypto::SetHashValueByChar(privkeyhash, 0, sizeof(privkeyhash.data) - 15, 0);
+              if (privkeyhash != kBid.hash3) {
+                  MERROR("" << __func__ << " hash3 error, vecSecret:" << string_tools::pod_to_hex(block.vecSecret) << ", privkeyhash " << privkeyhash);
+                  return false;
+              }
+
+              return true;
+          }
+      }
+      MERROR("" << __func__ << " not found correct miner bid data");
+      return false;
+  }
+
+  bool core::CheckBlockForPop(const cryptonote::block& block)
+  {
+      LOG_PRINT_L3("core::" << __func__);
+      if (block.prev_id == crypto::null_hash) {
+          return true;
+      }
+
+      uint64_t iBlockHeight = 0;
+      // block height check
+      cryptonote::block prevBlock;
+      {
+          const crypto::hash& prev_id = block.prev_id;
+          if (!m_blockchain_storage.get_block_by_hash(prev_id, prevBlock)) {
+              MERROR("" << __func__ << " get_block_by_hash prev_id fail");
+              return false;
+          }
+          uint64_t nHeight = get_block_height(prevBlock);
+          if (nHeight < POP_FORK_HEIGHT()) {
+              return true;
+          }
+          iBlockHeight = nHeight + 1;
+      }
+
+      if (iBlockHeight >= POP_FORK_HEIGHT())
+      {
+          std::vector<transaction> txs;
+          std::vector<crypto::hash> missed_txs;
+          get_transactions(block.tx_hashes, txs, missed_txs);
+          for (const auto& tx : txs) {
+              if (tx.version < 1000 && !is_coinbase(tx)) { //TODO: can not accept version?
+                  MERROR("" << __func__ << " check block tx version fail");
+                  return false;
+              }
+          }
+      }
+      return true;
+  }
+
+  bool core::SignBlock(cryptonote::block& block, const account_public_address& miner_adr, const crypto::secret_key& sec_key)
+  {
+      LOG_PRINT_L3("core::" << __func__);
+      uint64_t nHeight = get_block_height(block);
+      if (nHeight < POP_FORK_HEIGHT())
+          return true;
+
+      cryptonote::block prevBlock;
+      crypto::hash prev_id = block.prev_id;
+      if (!m_blockchain_storage.get_block_by_hash(prev_id, prevBlock)) {
+          MERROR("" << __func__ << " get_block_by_hash prev_id fail");
+          return false;
+      }
+
+      BidData kBid;
+      crypto::secret_key kPKey;
+      if (!GetPopMinerAddress(kBid, kPKey, prevBlock, nHeight, block.timestamp, miner_adr)) {
+          MERROR("" << __func__ << " GetPopMinerAddress fail");
+          return false;
+      }
+
+      block.minerAddr = miner_adr.m_view_public_key;
+      block.vecSecret = kPKey;
+
+      crypto::public_key secpubkey;
+      if (!crypto::secret_key_to_public_key(sec_key, secpubkey) || secpubkey != miner_adr.m_view_public_key) {
+          MERROR("" << __func__ << "miner pub key / secret key not match!");
+          return false;
+      }
+
+      //get no signature hash
+      cryptonote::block bl = block;
+      bl.vchBlockSig = boost::value_initialized<crypto::signature>(); //clear signature
+      crypto::hash blhash;
+      get_block_hash(bl, blhash);
+      LOG_PRINT_L2("signblock hash " << string_tools::pod_to_hex(blhash));
+
+      crypto::generate_signature(blhash, bl.minerAddr, sec_key, block.vchBlockSig);
+      //update hash
+      //block.invalidate_hashes();
+      //get_block_hash(block);
+      return true;
+  }
+
+  bool core::CheckBlockHeaderSignature(const cryptonote::block& block)
+  {
+      LOG_PRINT_L3("core::" << __func__);
+      uint64_t nHeight = get_block_height(block);
+      if (nHeight < POP_FORK_HEIGHT())
+          return true;
+
+      cryptonote::block bl = block;
+      bl.vchBlockSig = boost::value_initialized<crypto::signature>(); //clear signature
+      crypto::hash blhash;
+      bl.invalidate_hashes();
+      get_block_hash(bl, blhash);
+      MGINFO_YELLOW("checksign hash " << string_tools::pod_to_hex(blhash));
+
+      return crypto::check_signature(blhash, block.minerAddr, block.vchBlockSig);
+  }
+
+  bool core::CheckPopMining(const cryptonote::block& block)
+  {
+      LOG_PRINT_L3("core::" << __func__);
+      uint64_t blockheight = get_block_height(block);
+      if (blockheight == 0)
+          return true;
+
+      if (blockheight >= POP_FORK_HEIGHT())
+      {
+          if (!CheckHeaderForPop(block))
+              return false;
+          if (!CheckBlockForPop(block)) //TODO: make sure block's transactions have serilized
+              return false;
+      }
+
+      return true;
+  }
+
+  uint64_t core::POP_FORK_HEIGHT() const
+  {
+      if (m_ipopforkheight > 0) {
+          return m_ipopforkheight;
+      }
+      return get_blockchain_storage().POP_FORK_HEIGHT();
+  }
+
+  uint64_t core::XMR_BID_START() const
+  {
+      return POP_FORK_HEIGHT() - BID_WAIT;
+  }
+
+  uint32_t core::BTC_BID_START() const
+  {
+      if (m_ibtcbidstart > 0) {
+          return m_ibtcbidstart;
+      }
+      return ::BTC_BID_START;
+  }
+
+  uint8_t core::get_ideal_version(uint64_t height) const
+  {
+      return m_blockchain_storage.get_ideal_version(height);
   }
 }

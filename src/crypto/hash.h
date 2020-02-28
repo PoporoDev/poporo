@@ -47,6 +47,25 @@ namespace crypto {
 #pragma pack(push, 1)
   POD_CLASS hash {
     char data[HASH_SIZE];
+
+  public:
+    inline int Compare(const hash &other) const {
+        for (size_t i = 0; i < HASH_SIZE; i++) {
+            uint8_t a = (uint8_t)data[HASH_SIZE - 1 - i];
+            uint8_t b = (uint8_t)other.data[HASH_SIZE - 1 - i];
+            if (a > b) {
+                return 1;
+            }
+            if (a < b) {
+                return -1;
+            }
+        }
+
+        return 0;
+    }
+    friend inline bool operator<(const hash &a, const hash &b) {
+        return a.Compare(b) < 0;
+    }
   };
   POD_CLASS hash8 {
     char data[8];
@@ -91,6 +110,14 @@ namespace crypto {
 
   constexpr static crypto::hash null_hash = {};
   constexpr static crypto::hash8 null_hash8 = {};
+
+  inline void SetHashValueByChar(hash &h, std::size_t from, std::size_t to, char val) {
+      if (from < to && to <= HASH_SIZE) {
+          for (std::size_t i = from; i < to; i++) {
+              h.data[i] = val;
+          }
+      }
+  }
 }
 
 CRYPTO_MAKE_HASHABLE(hash)

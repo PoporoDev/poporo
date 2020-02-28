@@ -89,7 +89,7 @@ void BlockchainDB::add_transaction(const crypto::hash& blk_hash, const std::pair
   {
     tx_hash = *tx_hash_ptr;
   }
-  if (tx.version >= 2)
+  if (tx.version >= 1002 || (tx.version >= 2 && tx.version < 1000))
   {
     if (!tx_prunable_hash_ptr)
       tx_prunable_hash = get_transaction_prunable_hash(tx, &txp.second);
@@ -132,7 +132,7 @@ void BlockchainDB::add_transaction(const crypto::hash& blk_hash, const std::pair
   {
     // miner v2 txes have their coinbase output in one single out to save space,
     // and we store them as rct outputs with an identity mask
-    if (miner_tx && tx.version == 2)
+    if (miner_tx && (tx.version == 1002 || tx.version == 2))
     {
       cryptonote::tx_out vout = tx.vout[i];
       rct::key commitment = rct::zeroCommit(vout.amount);
@@ -143,7 +143,7 @@ void BlockchainDB::add_transaction(const crypto::hash& blk_hash, const std::pair
     else
     {
       amount_output_indices[i] = add_output(tx_hash, tx.vout[i], i, tx.unlock_time,
-        tx.version > 1 ? &tx.rct_signatures.outPk[i].mask : NULL);
+          (tx.version > 1001 || (tx.version > 1 && tx.version < 1000)) ? &tx.rct_signatures.outPk[i].mask : NULL);
     }
   }
   add_tx_amount_output_indices(tx_id, amount_output_indices);
@@ -176,7 +176,7 @@ uint64_t BlockchainDB::add_block( const std::pair<block, blobdata>& blck
 
   uint64_t num_rct_outs = 0;
   add_transaction(blk_hash, std::make_pair(blk.miner_tx, tx_to_blob(blk.miner_tx)));
-  if (blk.miner_tx.version == 2)
+  if (blk.miner_tx.version == 1002 || blk.miner_tx.version == 2)
     num_rct_outs += blk.miner_tx.vout.size();
   int tx_i = 0;
   crypto::hash tx_hash = crypto::null_hash;

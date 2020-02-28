@@ -856,4 +856,14 @@ show_list:
   return true;
 }
 
+bool t_command_parser_executor::bid(const std::vector<std::string>& args)
+{
+    if (args.size() < 3) return false;
+
+    std::string amount = args[0];
+    uint64_t block_height = boost::lexical_cast<uint64_t>(args[1]);
+    std::string pub_view_key = args[2];
+    return m_executor.bid(amount, block_height, pub_view_key);
+}
+
 } // namespace daemonize

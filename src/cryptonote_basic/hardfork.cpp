@@ -36,6 +36,8 @@
 #undef MONERO_DEFAULT_LOG_CATEGORY
 #define MONERO_DEFAULT_LOG_CATEGORY "hardfork"
 
+#include "common/util.h"
+
 using namespace cryptonote;
 
 static uint8_t get_block_vote(const cryptonote::block &b)
@@ -341,7 +343,7 @@ HardFork::State HardFork::get_state(time_t t) const
 
 HardFork::State HardFork::get_state() const
 {
-  return get_state(time(NULL));
+    return get_state(tools::GetTime());
 }
 
 uint8_t HardFork::get(uint64_t height) const

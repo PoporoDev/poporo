@@ -252,4 +252,8 @@ namespace tools
   void clear_screen();
 
   std::vector<std::pair<std::string, size_t>> split_string_by_width(const std::string &s, size_t columns);
+
+  //mocktime for regtest
+  int64_t GetTime();
+  void SetMockTime(int64_t nMockTimeIn);
 }

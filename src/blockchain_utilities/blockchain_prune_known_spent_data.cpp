@@ -209,7 +209,7 @@ int main(int argc, char* argv[])
       for (const auto &out: tx.vout)
       {
         uint64_t amount = out.amount;
-        if (miner_tx && tx.version >= 2)
+        if (miner_tx && (tx.version >= 1002 || (tx.version >= 2 && tx.version < 1000)))
           amount = 0;
         if (amount == 0)
           continue;

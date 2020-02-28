@@ -1279,4 +1279,21 @@ std::string get_nix_version_display_string()
     return lines;
   }
 
+  static std::atomic<int64_t> nMockTime(0);
+
+  int64_t GetTime()
+  {
+      int64_t mocktime = nMockTime.load(std::memory_order_relaxed);
+      if (mocktime) return mocktime;
+
+      time_t now = time(nullptr);
+      assert(now > 0);
+      return now;
+  }
+
+  void SetMockTime(int64_t nMockTimeIn)
+  {
+      nMockTime.store(nMockTimeIn, std::memory_order_relaxed);
+      MINFO(__func__ << nMockTimeIn);
+  }
 }

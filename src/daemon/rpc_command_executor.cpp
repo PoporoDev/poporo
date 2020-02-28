@@ -2442,4 +2442,30 @@ bool t_rpc_command_executor::rpc_payments()
     return true;
 }
 
+bool t_rpc_command_executor::bid(const std::string& amount, uint64_t block_height, const std::string& pub_view_key) {
+    cryptonote::COMMAND_RPC_BID::request req;
+    cryptonote::COMMAND_RPC_BID::response res;
+    req.amount = amount;
+    req.block_height = block_height;
+    req.pub_view_key = pub_view_key;
+
+    std::string fail_message = "what's your problem";
+    if (m_is_rpc)
+    {
+        if (m_rpc_client->rpc_request(req, res, "/bid", fail_message.c_str()))
+        {
+            tools::success_msg_writer() << "bid ok";
+        }
+    }
+    else
+    {
+        if (!m_rpc_server->on_bid(req, res) || res.status != CORE_RPC_STATUS_OK)
+        {
+            tools::fail_msg_writer() << make_error(fail_message, res.status);
+            return true;
+        }
+    }
+
+    return true;
+}
 }// namespace daemonize

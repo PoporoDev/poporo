@@ -328,4 +328,25 @@ boost::optional<std::string> NodeRPCProxy::get_rpc_payment_info(bool mining, boo
   return boost::none;
 }
 
+boost::optional<std::string> NodeRPCProxy::get_ideal_version(uint64_t height, uint8_t &version) const
+{
+    if (m_offline)
+        return boost::optional<std::string>("offline");
+
+    cryptonote::COMMAND_RPC_GET_IDEAL_VERSION::request req_t = AUTO_VAL_INIT(req_t);
+    cryptonote::COMMAND_RPC_GET_IDEAL_VERSION::response resp_t = AUTO_VAL_INIT(resp_t);
+
+    m_daemon_rpc_mutex.lock();
+    req_t.height = height;
+    bool r = net_utils::invoke_http_json_rpc("/json_rpc", "get_ideal_version", req_t, resp_t, m_http_client, rpc_timeout);
+    m_daemon_rpc_mutex.unlock();
+
+    CHECK_AND_ASSERT_MES(r, std::string("Failed to connect to daemon"), "Failed to connect to daemon");
+    CHECK_AND_ASSERT_MES(resp_t.status != CORE_RPC_STATUS_BUSY, resp_t.status, "Failed to connect to daemon");
+    CHECK_AND_ASSERT_MES(resp_t.status == CORE_RPC_STATUS_OK, resp_t.status, "Failed to get fee estimate");
+
+    version = resp_t.version;
+    return boost::optional<std::string>();
+}
+
 }

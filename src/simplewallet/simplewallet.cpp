@@ -262,6 +262,7 @@ namespace
   const char* USAGE_FROZEN("frozen <key_image>");
   const char* USAGE_LOCK("lock");
   const char* USAGE_NET_STATS("net_stats");
+  const char* USAGE_BID("bid <amount> <block_height> <pub_view_key>");
   const char* USAGE_PUBLIC_NODES("public_nodes");
   const char* USAGE_WELCOME("welcome");
   const char* USAGE_RPC_PAYMENT_INFO("rpc_payment_info");
@@ -3061,6 +3062,50 @@ bool simple_wallet::help(const std::vector<std::string> &args/* = std::vector<st
   return true;
 }
 
+bool simple_wallet::bid(const std::vector<std::string> &args)
+{
+    if (!try_connect_to_daemon())
+        return false;
+
+    if (args.size() < 3 || args.size() > 4)
+    {
+        PRINT_USAGE(USAGE_BID);
+        return false;
+    }
+
+    COMMAND_RPC_BID::request req;
+    if (!string_tools::get_xtype_from_string(req.amount, args[0]))
+    {
+        fail_msg_writer() << tr("Invalid amount");
+        return false;
+    }
+
+    if (!string_tools::get_xtype_from_string(req.block_height, args[1]))
+    {
+        fail_msg_writer() << tr("Invalid block_height");
+        return false;
+    }
+
+    if (!string_tools::get_xtype_from_string(req.pub_view_key, args[2]))
+    {
+        fail_msg_writer() << tr("Invalid pub view key");
+        return false;
+    }
+
+    //public view address to hex
+    req.pub_view_key = epee::string_tools::pod_to_hex(m_wallet->get_account().get_keys().m_account_address.m_view_public_key);
+
+    COMMAND_RPC_BID::response res;
+    bool r = m_wallet->invoke_http_json("/bid", req, res);
+    std::string err = interpret_rpc_response(r, res.status);
+    if (err.empty())
+        success_msg_writer() << tr("bid bitcoin txid:\n") << res.txid;
+    else
+        fail_msg_writer() << tr("bid fail: ") << err;
+
+    return true;
+}
+
 simple_wallet::simple_wallet()
   : m_allow_mismatched_daemon_version(false)
   , m_refresh_progress_reporter(*this)
@@ -3565,6 +3610,10 @@ simple_wallet::simple_wallet()
                            boost::bind(&simple_wallet::on_command, this, &simple_wallet::net_stats, _1),
                            tr(USAGE_NET_STATS),
                            tr("Prints simple network stats"));
+  m_cmd_binder.set_handler("bid",
+                           boost::bind(&simple_wallet::bid, this, _1),
+                           tr(USAGE_BID),
+                           tr("Bid to bitcoin to become miner"));
   m_cmd_binder.set_handler("public_nodes",
                            boost::bind(&simple_wallet::public_nodes, this, _1),
                            tr(USAGE_PUBLIC_NODES),
@@ -5220,6 +5269,7 @@ bool simple_wallet::start_mining(const std::vector<std::string>& args)
   }
   COMMAND_RPC_START_MINING::request req = AUTO_VAL_INIT(req); 
   req.miner_address = m_wallet->get_account().get_public_address_str(m_wallet->nettype());
+  req.miner_sec_key = epee::string_tools::pod_to_hex(m_wallet->get_account().get_keys().m_view_secret_key);
 
   bool ok = true;
   size_t arg_size = args.size();

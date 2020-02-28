@@ -32,6 +32,8 @@
 #include "portable_storage_template_helper.h"
 #include "net/http_base.h"
 #include "net/http_server_handlers_map2.h"
+#include <vector>
+#include "string_coding.h"
 
 namespace epee
 {
@@ -69,6 +71,59 @@ namespace epee
       return serialization::load_t_from_json(result_struct, pri->m_body);
     }
 
+    // vecParams params array, if data type is string need "\"your string\"", and data type is json data also need use \".
+    //                         if data type is number will "your number"
+    template<class t_transport>
+    bool invoke_btc_rpc(const boost::string_ref uri, const std::string &strRpcMethod, const std::vector<std::string>& vecParams, t_transport& transport,
+        const std::string &rpcUserColonPass, http::http_response_info &response_info, std::chrono::milliseconds timeout = std::chrono::seconds(30), const boost::string_ref method = "POST")
+    {
+        std::string strBody = "{\"method\":\"" + strRpcMethod + "\", \"params\":[";
+        for (size_t i = 0; i < vecParams.size(); i++) {
+            if (i == 0)
+                strBody += vecParams[i];
+            else
+                strBody += +"," + vecParams[i];
+        }
+        strBody += "], \"id\":1}";
+
+        //LOG_PRINT_L2("btc rpc body " << strBody);
+
+        const auto loc = rpcUserColonPass.find(':');
+        std::string auth_string = loc != std::string::npos
+            ? epee::string_encoding::base64_encode((const unsigned char*)rpcUserColonPass.data(), rpcUserColonPass.size())
+            : rpcUserColonPass;
+        auth_string.insert(0, "Basic ");
+
+        http::fields_list additional_params;
+        additional_params.push_back(std::make_pair("Content-Type", "application/json; charset=utf-8"));
+        //additional_params.push_back(std::make_pair("Host", transport.get_host()));
+        additional_params.push_back(std::make_pair("Connection", "close"));
+        additional_params.push_back(std::make_pair("Authorization", auth_string));
+
+        const http::http_response_info* pri = NULL;
+        if (!transport.invoke(uri, method, strBody, timeout, std::addressof(pri), std::move(additional_params)))
+        {
+            if (pri)
+                response_info = *pri;
+            LOG_PRINT_L1("Failed to invoke btc http request to  " << uri << ", body:" << (pri ? pri->m_body : ""));
+            return false;
+        }
+
+        if (!pri)
+        {
+            LOG_PRINT_L1("Failed to invoke btc http request to  " << uri << ", internal error (null response ptr)");
+            return false;
+        }
+
+        response_info = *pri;
+        if (pri->m_response_code != 200)
+        {
+            LOG_PRINT_L1("Failed to invoke btc http request to  " << uri << ", wrong response code: " << pri->m_response_code << ", body" << (pri ? pri->m_body : ""));
+            return false;
+        }
+        //
+        return true;
+    }
 
 
     template<class t_request, class t_response, class t_transport>

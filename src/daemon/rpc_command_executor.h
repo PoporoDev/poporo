@@ -171,6 +171,8 @@ public:
   bool rpc_payments();
 
   bool flush_cache(bool bad_txs);
+
+  bool bid(const std::string& amount, uint64_t block_height, const std::string& pub_view_key);
 };
 
 } // namespace daemonize

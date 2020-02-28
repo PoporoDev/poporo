@@ -283,5 +283,6 @@ bool construct_tx_rct(tools::wallet2 * sender_wallet, std::vector<cryptonote::tx
   std::vector<crypto::secret_key> additional_tx_keys;
   std::vector<tx_destination_entry> destinations_copy = destinations;
   rct::RCTConfig rct_config = {range_proof_type, bp_version};
-  return construct_tx_and_get_tx_key(sender_wallet->get_account().get_keys(), subaddresses, sources, destinations_copy, change_addr, extra, tx, unlock_time, tx_key, additional_tx_keys, rct, rct_config, nullptr);
+  uint8_t hard_fork_version = 0;
+  return construct_tx_and_get_tx_key(sender_wallet->get_account().get_keys(), subaddresses, sources, destinations_copy, change_addr, extra, tx, unlock_time, tx_key, additional_tx_keys, hard_fork_version, rct, rct_config, nullptr);
 }

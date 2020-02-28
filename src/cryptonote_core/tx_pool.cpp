@@ -149,7 +149,7 @@ namespace cryptonote
     // fee per kilobyte, size rounded up.
     uint64_t fee;
 
-    if (tx.version == 1)
+    if (tx.version == 1001 || tx.version == 1)
     {
       uint64_t inputs_amount = 0;
       if(!get_inputs_money_amount(tx, inputs_amount))
@@ -223,7 +223,7 @@ namespace cryptonote
     // assume failure during verification steps until success is certain
     tvc.m_verifivation_failed = true;
 
-    time_t receive_time = time(nullptr);
+    time_t receive_time = tools::GetTime();
 
     crypto::hash max_used_block_id = null_hash;
     uint64_t max_used_block_height = 0;
@@ -243,7 +243,7 @@ namespace cryptonote
         meta.last_failed_id = null_hash;
         meta.kept_by_block = kept_by_block;
         meta.receive_time = receive_time;
-        meta.last_relayed_time = time(NULL);
+        meta.last_relayed_time = tools::GetTime();
         meta.relayed = relayed;
         meta.do_not_relay = do_not_relay;
         meta.double_spend_seen = have_tx_keyimges_as_spent(tx);
@@ -287,7 +287,7 @@ namespace cryptonote
       meta.last_failed_height = 0;
       meta.last_failed_id = null_hash;
       meta.receive_time = receive_time;
-      meta.last_relayed_time = time(NULL);
+      meta.last_relayed_time = tools::GetTime();
       meta.relayed = relayed;
       meta.do_not_relay = do_not_relay;
       meta.double_spend_seen = false;
@@ -592,7 +592,7 @@ namespace cryptonote
     CRITICAL_REGION_LOCAL1(m_blockchain);
     std::list<std::pair<crypto::hash, uint64_t>> remove;
     m_blockchain.for_all_txpool_txes([this, &remove](const crypto::hash &txid, const txpool_tx_meta_t &meta, const cryptonote::blobdata*) {
-      uint64_t tx_age = time(nullptr) - meta.receive_time;
+      uint64_t tx_age = tools::GetTime() - meta.receive_time;
 
       if((tx_age > CRYPTONOTE_MEMPOOL_TX_LIVETIME && !meta.kept_by_block) ||
          (tx_age > CRYPTONOTE_MEMPOOL_TX_FROM_ALT_BLOCK_LIVETIME && meta.kept_by_block) )
@@ -653,7 +653,7 @@ namespace cryptonote
   {
     CRITICAL_REGION_LOCAL(m_transactions_lock);
     CRITICAL_REGION_LOCAL1(m_blockchain);
-    const uint64_t now = time(NULL);
+    const uint64_t now = tools::GetTime();
     txs.reserve(m_blockchain.get_txpool_tx_count());
     m_blockchain.for_all_txpool_txes([this, now, &txs](const crypto::hash &txid, const txpool_tx_meta_t &meta, const cryptonote::blobdata *){
       // 0 fee transactions are never relayed
@@ -686,7 +686,7 @@ namespace cryptonote
   {
     CRITICAL_REGION_LOCAL(m_transactions_lock);
     CRITICAL_REGION_LOCAL1(m_blockchain);
-    const time_t now = time(NULL);
+    const time_t now = tools::GetTime();
     LockedTXN lock(m_blockchain);
     for (auto it = txs.begin(); it != txs.end(); ++it)
     {
@@ -750,7 +750,7 @@ namespace cryptonote
   {
     CRITICAL_REGION_LOCAL(m_transactions_lock);
     CRITICAL_REGION_LOCAL1(m_blockchain);
-    const uint64_t now = time(NULL);
+    const uint64_t now = tools::GetTime();
     backlog.reserve(m_blockchain.get_txpool_tx_count(include_unrelayed_txes));
     m_blockchain.for_all_txpool_txes([&backlog, now](const crypto::hash &txid, const txpool_tx_meta_t &meta, const cryptonote::blobdata *bd){
       backlog.push_back({meta.weight, meta.fee, meta.receive_time - now});
@@ -762,7 +762,7 @@ namespace cryptonote
   {
     CRITICAL_REGION_LOCAL(m_transactions_lock);
     CRITICAL_REGION_LOCAL1(m_blockchain);
-    const uint64_t now = time(NULL);
+    const uint64_t now = tools::GetTime();
     std::map<uint64_t, txpool_histo> agebytes;
     stats.txs_total = m_blockchain.get_txpool_tx_count(include_unrelayed_txes);
     std::vector<uint32_t> weights;

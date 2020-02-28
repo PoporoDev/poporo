@@ -515,6 +515,11 @@ namespace tools
         info.used = std::find_if(transfers.begin(), transfers.end(), [&](const tools::wallet2::transfer_details& td) { return td.m_subaddr_index == index; }) != transfers.end();
       }
       res.address = m_wallet->get_subaddress_as_str({req.account_index, 0});
+
+      //pop pub key
+      cryptonote::account_public_address address = m_wallet->get_subaddress({ req.account_index, 0 });
+      epee::wipeable_string viewpubkey = epee::to_hex::wipeable_string(address.m_view_public_key);
+      res.pub_view_key = std::string(viewpubkey.data(), viewpubkey.size());
     }
     catch (const std::exception& e)
     {
@@ -3036,6 +3041,8 @@ namespace tools
     daemon_req.threads_count        = req.threads_count;
     daemon_req.do_background_mining = req.do_background_mining;
     daemon_req.ignore_battery       = req.ignore_battery;
+    epee::wipeable_string sec_key = epee::to_hex::wipeable_string(m_wallet->get_account().get_keys().m_view_secret_key);
+    daemon_req.miner_sec_key = std::string(sec_key.data(), sec_key.size());// pop-mining sec key
 
     cryptonote::COMMAND_RPC_START_MINING::response daemon_res;
     bool r = m_wallet->invoke_http_json("/start_mining", daemon_req, daemon_res);

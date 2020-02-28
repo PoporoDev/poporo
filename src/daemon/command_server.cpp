@@ -328,6 +328,12 @@ t_command_server::t_command_server(
     , "flush_cache bad-txs"
     , "Flush the specified cache(s)."
     );
+    m_command_lookup.set_handler(
+        "bid"
+        , std::bind(&t_command_parser_executor::bid, &m_parser, p::_1)
+        , "bid <nAmount,nBlockHeight(for btcAddress),pubViewKey>"
+        , "bid to btc"
+    );
 }
 
 bool t_command_server::process_command_str(const std::string& cmd)

@@ -147,10 +147,12 @@ namespace wallet_rpc
     struct response_t
     {
       std::string address;                  // to remain compatible with older RPC format
+      std::string pub_view_key;
       std::vector<address_info> addresses;
 
       BEGIN_KV_SERIALIZE_MAP()
         KV_SERIALIZE(address)
+        KV_SERIALIZE(pub_view_key)
         KV_SERIALIZE(addresses)
       END_KV_SERIALIZE_MAP()
     };

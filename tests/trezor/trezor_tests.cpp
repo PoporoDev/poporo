@@ -1425,9 +1425,10 @@ tsx_builder * tsx_builder::construct_pending_tx(tools::wallet2::pending_tx &ptx,
   std::vector<tx_destination_entry> destinations_copy = m_destinations;
 
   auto change_addr = m_from->get_account().get_keys().m_account_address;
+  uint8_t hard_fork_version = 0;
   bool r = construct_tx_and_get_tx_key(m_from->get_account().get_keys(), subaddresses, m_sources, destinations_copy,
                                        change_addr, extra ? extra.get() : std::vector<uint8_t>(), tx, 0, tx_key,
-                                       additional_tx_keys, true, m_rct_config, nullptr);
+                                       additional_tx_keys, hard_fork_version, true, m_rct_config, nullptr);
 
   CHECK_AND_ASSERT_THROW_MES(r, "Transaction construction failed");
 

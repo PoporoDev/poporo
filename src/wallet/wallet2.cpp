@@ -2060,7 +2060,7 @@ void wallet2::process_new_transaction(const crypto::hash &txid, const cryptonote
               td.m_mask = tx_scan_info[o].mask;
               td.m_rct = true;
             }
-            else if (miner_tx && tx.version == 2)
+            else if (miner_tx && (tx.version == 1002 || tx.version == 2))
             {
               td.m_mask = rct::identity();
               td.m_rct = true;
@@ -2132,7 +2132,7 @@ void wallet2::process_new_transaction(const crypto::hash &txid, const cryptonote
               td.m_mask = tx_scan_info[o].mask;
               td.m_rct = true;
             }
-            else if (miner_tx && tx.version == 2)
+            else if (miner_tx && (tx.version == 1002 || tx.version == 2))
             {
               td.m_mask = rct::identity();
               td.m_rct = true;
@@ -2241,7 +2241,7 @@ void wallet2::process_new_transaction(const crypto::hash &txid, const cryptonote
     }
   }
 
-  uint64_t fee = miner_tx ? 0 : tx.version == 1 ? tx_money_spent_in_ins - get_outs_money_amount(tx) : tx.rct_signatures.txnFee;
+  uint64_t fee = miner_tx ? 0 : (tx.version == 1001 || tx.version == 1) ? tx_money_spent_in_ins - get_outs_money_amount(tx) : tx.rct_signatures.txnFee;
 
   if (tx_money_spent_in_ins > 0 && !pool)
   {
@@ -2404,7 +2404,7 @@ void wallet2::process_outgoing(const crypto::hash &txid, const cryptonote::trans
     // wallet (eg, we're a cold wallet and the hot wallet sent it). For RCT transactions,
     // we only see 0 input amounts, so have to deduce amount out from other parameters.
     entry.first->second.m_amount_in = spent;
-    if (tx.version == 1)
+    if (tx.version == 1001 || tx.version == 1)
       entry.first->second.m_amount_out = get_outs_money_amount(tx);
     else
       entry.first->second.m_amount_out = spent - tx.rct_signatures.txnFee;
@@ -6496,6 +6496,8 @@ bool wallet2::sign_tx(unsigned_tx_set &exported_txs, std::vector<wallet2::pendin
 {
   import_outputs(exported_txs.transfers);
 
+  uint8_t hard_fork_version = get_hard_fork_version();
+
   // sign the transactions
   for (size_t n = 0; n < exported_txs.txes.size(); ++n)
   {
@@ -6508,7 +6510,7 @@ bool wallet2::sign_tx(unsigned_tx_set &exported_txs, std::vector<wallet2::pendin
     crypto::secret_key tx_key;
     std::vector<crypto::secret_key> additional_tx_keys;
     rct::multisig_out msout;
-    bool r = cryptonote::construct_tx_and_get_tx_key(m_account.get_keys(), m_subaddresses, sd.sources, sd.splitted_dsts, sd.change_dts.addr, sd.extra, ptx.tx, sd.unlock_time, tx_key, additional_tx_keys, sd.use_rct, rct_config, m_multisig ? &msout : NULL);
+    bool r = cryptonote::construct_tx_and_get_tx_key(m_account.get_keys(), m_subaddresses, sd.sources, sd.splitted_dsts, sd.change_dts.addr, sd.extra, ptx.tx, sd.unlock_time, tx_key, additional_tx_keys, hard_fork_version, sd.use_rct, rct_config, m_multisig ? &msout : NULL);
     THROW_WALLET_EXCEPTION_IF(!r, error::tx_not_constructed, sd.sources, sd.splitted_dsts, sd.unlock_time, m_nettype);
     // we don't test tx size, because we don't know the current limit, due to not having a blockchain,
     // and it's a bit pointless to fail there anyway, since it'd be a (good) guess only. We sign anyway,
@@ -6955,6 +6957,19 @@ bool wallet2::load_multisig_tx_from_file(const std::string &filename, multisig_t
   return true;
 }
 //----------------------------------------------------------------------------------------------------
+uint8_t wallet2::get_hard_fork_version(void)
+{
+    uint8_t hard_fork_version = 0;
+    uint64_t height;
+    boost::optional<std::string> result = m_node_rpc_proxy.get_height(height);
+    THROW_WALLET_EXCEPTION_IF(result, error::wallet_internal_error, "Failed to get height");
+    result = m_node_rpc_proxy.get_ideal_version(height + 1, hard_fork_version);
+    THROW_WALLET_EXCEPTION_IF(result, error::wallet_internal_error, "Failed to get ideal version");
+    LOG_PRINT_L0("get_hard_fork_version height " << height << " hard_fork_version " << (uint32_t)hard_fork_version);
+    return hard_fork_version;
+}
+
+//----------------------------------------------------------------------------------------------------
 bool wallet2::sign_multisig_tx(multisig_tx_set &exported_txs, std::vector<crypto::hash> &txids)
 {
   THROW_WALLET_EXCEPTION_IF(exported_txs.m_ptx.empty(), error::wallet_internal_error, "No tx found");
@@ -6970,6 +6985,8 @@ bool wallet2::sign_multisig_tx(multisig_tx_set &exported_txs, std::vector<crypto
 
   txids.clear();
 
+  uint8_t hard_fork_version = get_hard_fork_version();
+
   // sign the transactions
   for (size_t n = 0; n < exported_txs.m_ptx.size(); ++n)
   {
@@ -6982,7 +6999,7 @@ bool wallet2::sign_multisig_tx(multisig_tx_set &exported_txs, std::vector<crypto
     rct::multisig_out msout = ptx.multisig_sigs.front().msout;
     auto sources = sd.sources;
     rct::RCTConfig rct_config = sd.rct_config;
-    bool r = cryptonote::construct_tx_with_tx_key(m_account.get_keys(), m_subaddresses, sources, sd.splitted_dsts, ptx.change_dts.addr, sd.extra, tx, sd.unlock_time, ptx.tx_key, ptx.additional_tx_keys, sd.use_rct, rct_config, &msout, false);
+    bool r = cryptonote::construct_tx_with_tx_key(m_account.get_keys(), m_subaddresses, sources, sd.splitted_dsts, ptx.change_dts.addr, sd.extra, tx, sd.unlock_time, ptx.tx_key, ptx.additional_tx_keys, hard_fork_version, sd.use_rct, rct_config, &msout, false);
     THROW_WALLET_EXCEPTION_IF(!r, error::tx_not_constructed, sd.sources, sd.splitted_dsts, sd.unlock_time, m_nettype);
 
     THROW_WALLET_EXCEPTION_IF(get_transaction_prefix_hash (tx) != get_transaction_prefix_hash(ptx.tx),
@@ -8410,8 +8427,9 @@ void wallet2::transfer_selected(const std::vector<cryptonote::tx_destination_ent
   crypto::secret_key tx_key;
   std::vector<crypto::secret_key> additional_tx_keys;
   rct::multisig_out msout;
+  uint8_t hard_fork_version = get_hard_fork_version();
   LOG_PRINT_L2("constructing tx");
-  bool r = cryptonote::construct_tx_and_get_tx_key(m_account.get_keys(), m_subaddresses, sources, splitted_dsts, change_dts.addr, extra, tx, unlock_time, tx_key, additional_tx_keys, false, {}, m_multisig ? &msout : NULL);
+  bool r = cryptonote::construct_tx_and_get_tx_key(m_account.get_keys(), m_subaddresses, sources, splitted_dsts, change_dts.addr, extra, tx, unlock_time, tx_key, additional_tx_keys, hard_fork_version, false, {}, m_multisig ? &msout : NULL);
   LOG_PRINT_L2("constructed tx, r="<<r);
   THROW_WALLET_EXCEPTION_IF(!r, error::tx_not_constructed, sources, splitted_dsts, unlock_time, m_nettype);
   THROW_WALLET_EXCEPTION_IF(upper_transaction_weight_limit <= get_transaction_weight(tx), error::tx_too_big, tx, upper_transaction_weight_limit);
@@ -8643,7 +8661,8 @@ void wallet2::transfer_selected_rct(std::vector<cryptonote::tx_destination_entry
   rct::multisig_out msout;
   LOG_PRINT_L2("constructing tx");
   auto sources_copy = sources;
-  bool r = cryptonote::construct_tx_and_get_tx_key(m_account.get_keys(), m_subaddresses, sources, splitted_dsts, change_dts.addr, extra, tx, unlock_time, tx_key, additional_tx_keys, true, rct_config, m_multisig ? &msout : NULL);
+  uint8_t hard_fork_version = get_hard_fork_version();
+  bool r = cryptonote::construct_tx_and_get_tx_key(m_account.get_keys(), m_subaddresses, sources, splitted_dsts, change_dts.addr, extra, tx, unlock_time, tx_key, additional_tx_keys, hard_fork_version, true, rct_config, m_multisig ? &msout : NULL);
   LOG_PRINT_L2("constructed tx, r="<<r);
   THROW_WALLET_EXCEPTION_IF(!r, error::tx_not_constructed, sources, dsts, unlock_time, m_nettype);
   THROW_WALLET_EXCEPTION_IF(upper_transaction_weight_limit <= get_transaction_weight(tx), error::tx_too_big, tx, upper_transaction_weight_limit);
@@ -8688,7 +8707,7 @@ void wallet2::transfer_selected_rct(std::vector<cryptonote::tx_destination_entry
         LOG_PRINT_L2("Creating supplementary multisig transaction");
         cryptonote::transaction ms_tx;
         auto sources_copy_copy = sources_copy;
-        bool r = cryptonote::construct_tx_with_tx_key(m_account.get_keys(), m_subaddresses, sources_copy_copy, splitted_dsts, change_dts.addr, extra, ms_tx, unlock_time,tx_key, additional_tx_keys, true, rct_config, &msout, false);
+        bool r = cryptonote::construct_tx_with_tx_key(m_account.get_keys(), m_subaddresses, sources_copy_copy, splitted_dsts, change_dts.addr, extra, ms_tx, unlock_time,tx_key, additional_tx_keys, hard_fork_version, true, rct_config, &msout, false);
         LOG_PRINT_L2("constructed tx, r="<<r);
         THROW_WALLET_EXCEPTION_IF(!r, error::tx_not_constructed, sources, splitted_dsts, unlock_time, m_nettype);
         THROW_WALLET_EXCEPTION_IF(upper_transaction_weight_limit <= get_transaction_weight(tx), error::tx_too_big, tx, upper_transaction_weight_limit);
@@ -10388,6 +10407,8 @@ bool wallet2::use_fork_rules(uint8_t version, int64_t early_blocks)
   result = m_node_rpc_proxy.get_earliest_height(version, earliest_height);
   THROW_WALLET_EXCEPTION_IF(result, error::wallet_internal_error, "Failed to get earliest fork height");
 
+  MDEBUG(__func__ << " earliest_height " << earliest_height << " height " << height);
+
   bool close_enough = (int64_t)height >= (int64_t)earliest_height - early_blocks && earliest_height != std::numeric_limits<uint64_t>::max(); // start using the rules that many blocks beforehand
   if (close_enough)
     LOG_PRINT_L2("Using v" << (unsigned)version << " rules");
@@ -10999,7 +11020,7 @@ void wallet2::check_tx_key_helper(const cryptonote::transaction &tx, const crypt
     if (found)
     {
       uint64_t amount;
-      if (tx.version == 1 || tx.rct_signatures.type == rct::RCTTypeNull)
+      if ((tx.version == 1001 || tx.version == 1) || tx.rct_signatures.type == rct::RCTTypeNull)
       {
         amount = tx.vout[n].amount;
       }

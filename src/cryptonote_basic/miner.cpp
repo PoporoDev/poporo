@@ -169,7 +169,7 @@ namespace cryptonote
       extra_nonce = m_extra_messages[m_config.current_extra_message_index];
     }
 
-    if(!m_phandler->get_block_template(bl, m_mine_address, di, height, expected_reward, extra_nonce))
+    if(!m_phandler->get_block_template(bl, m_mine_address, m_mine_sec_key, di, height, expected_reward, extra_nonce))
     {
       LOG_ERROR("Failed to get_block_template(), stopping mining");
       return false;
@@ -360,14 +360,20 @@ namespace cryptonote
     return m_mine_address;
   }
   //-----------------------------------------------------------------------------------------------------
+  const crypto::secret_key& miner::get_mining_sec_key() const
+  {
+      return m_mine_sec_key;
+  }
+  //-----------------------------------------------------------------------------------------------------
   uint32_t miner::get_threads_count() const {
     return m_threads_total;
   }
   //-----------------------------------------------------------------------------------------------------
-  bool miner::start(const account_public_address& adr, size_t threads_count, bool do_background, bool ignore_battery)
+  bool miner::start(const account_public_address& adr, const crypto::secret_key& sec_key, size_t threads_count, bool do_background, bool ignore_battery)
   {
     m_block_reward = 0;
     m_mine_address = adr;
+    m_mine_sec_key = sec_key;
     m_threads_total = static_cast<uint32_t>(threads_count);
     if (threads_count == 0)
     {
@@ -473,6 +479,9 @@ namespace cryptonote
   //-----------------------------------------------------------------------------------------------------
   bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, const difficulty_type& diffic, uint64_t height)
   {
+      //TODO: set nonce pop block need resigned
+    if (bl.vchBlockSig != boost::value_initialized<crypto::signature>())
+      return false;
     for(; bl.nonce != std::numeric_limits<uint32_t>::max(); bl.nonce++)
     {
       crypto::hash h;
@@ -492,7 +501,7 @@ namespace cryptonote
   {
     if(m_do_mining)
     {
-      start(m_mine_address, m_threads_total, get_is_background_mining_enabled(), get_ignore_battery());
+      start(m_mine_address, m_mine_sec_key, m_threads_total, get_is_background_mining_enabled(), get_ignore_battery());
     }
   }
   //-----------------------------------------------------------------------------------------------------
@@ -570,7 +579,13 @@ namespace cryptonote
         continue;
       }
 
-      b.nonce = nonce;
+      if (b.vchBlockSig == boost::value_initialized<crypto::signature>()) // no signature
+      {
+          b.nonce = nonce;
+      }
+      //else 
+      //note: after block signature, don't modify the block data any more
+
       crypto::hash h;
       m_gbh(b, height, tools::get_max_concurrency(), h);
 
@@ -578,7 +593,7 @@ namespace cryptonote
       {
         //we lucky!
         ++m_config.current_extra_message_index;
-        MGINFO_GREEN("Found block " << get_block_hash(b) << " at height " << height << " for difficulty: " << local_diff);
+        MGINFO_GREEN("Found block " << get_block_hash(b) << " at height " << height << " for difficulty: " << local_diff << " m_template_no:" << m_template_no);
         cryptonote::block_verification_context bvc;
         if(!m_phandler->handle_block_found(b, bvc) || !bvc.m_added_to_main_chain)
         {
@@ -589,6 +604,10 @@ namespace cryptonote
           if (!m_config_folder_path.empty())
             epee::serialization::store_t_to_json_file(m_config, m_config_folder_path + "/" + MINER_CONFIG_FILE_NAME);
         }
+      }
+      else 
+      {
+          MGINFO_GREEN("check hash fail.");
       }
       nonce+=m_threads_total;
       ++m_hashes;

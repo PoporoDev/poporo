@@ -171,7 +171,7 @@ namespace cryptonote
 
     BEGIN_SERIALIZE()
       VARINT_FIELD(version)
-      if(version == 0 || CURRENT_TRANSACTION_VERSION < version) return false;
+      if (!(version > 0 && version <= 2) && !(version > 1000 && version <= CURRENT_TRANSACTION_VERSION)) return false;
       VARINT_FIELD(unlock_time)
       FIELD(vin)
       FIELD(vout)
@@ -243,7 +243,7 @@ namespace cryptonote
       if (std::is_same<Archive<W>, binary_archive<W>>())
         prefix_size = getpos(ar) - start_pos;
 
-      if (version == 1)
+      if (version == 1001 || version == 1)
       {
         if (std::is_same<Archive<W>, binary_archive<W>>())
           unprunable_size = getpos(ar) - start_pos;
@@ -310,7 +310,7 @@ namespace cryptonote
     {
       FIELDS(*static_cast<transaction_prefix *>(this))
 
-      if (version == 1)
+      if (version == 1001 || version == 1)
       {
       }
       else
@@ -451,12 +451,22 @@ namespace cryptonote
     crypto::hash  prev_id;
     uint32_t nonce;
 
+    crypto::secret_key vecSecret; // secret for miners
+    crypto::public_key minerAddr;
+    crypto::signature vchBlockSig;
+
     BEGIN_SERIALIZE()
       VARINT_FIELD(major_version)
       VARINT_FIELD(minor_version)
       VARINT_FIELD(timestamp)
       FIELD(prev_id)
       FIELD(nonce)
+      if (major_version >= HF_VERSION_POP_CONSENSUS)
+      {
+        FIELD(vecSecret)
+        FIELD(minerAddr)
+        FIELD(vchBlockSig)
+      }
     END_SERIALIZE()
   };
 
@@ -537,8 +547,46 @@ namespace cryptonote
     }
   };
   //---------------------------------------------------------------
+  struct BidData {
+      uint64_t nAmount;
+      crypto::hash hash1; // miner address
+      crypto::hash hash2; // top block hash
+      crypto::hash hash3; // secret hash
+      //crypto::hash hash4;
 
-}
+      crypto::public_key kAddr;
+
+      int64_t nWeights;
+
+      //serialize
+      BEGIN_SERIALIZE_OBJECT()
+          VARINT_FIELD(nAmount)
+          FIELD(hash1)
+          FIELD(hash2)
+          FIELD(hash3)
+          //FIELD(hash4)
+          FIELD(kAddr)
+      END_SERIALIZE()
+  };
+
+  struct BlockBidData
+  {
+      BlockBidData()
+          :blockTime(0)
+      {}
+
+      std::vector<BidData> bids;
+      std::vector<crypto::hash> hashs;
+      int64_t blockTime;
+
+      BEGIN_SERIALIZE_OBJECT()
+          FIELD(bids)
+          FIELD(hashs)
+          VARINT_FIELD(blockTime)
+      END_SERIALIZE()
+  };
+  //---------------------------------------------------------------
+} //namespace cryptonote
 
 namespace std {
   template <>

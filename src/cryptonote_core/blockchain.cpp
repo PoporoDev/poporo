@@ -62,6 +62,8 @@
 
 #define FIND_BLOCKCHAIN_SUPPLEMENT_MAX_SIZE (100*1024*1024) // 100 MB
 
+#define POP_MINE_DIFFICULTY 1
+
 using namespace crypto;
 
 //#include "serialization/json_archive.h"
@@ -363,11 +365,11 @@ bool Blockchain::init(BlockchainDB* db, const network_type nettype, bool offline
 
   // check how far behind we are
   uint64_t top_block_timestamp = m_db->get_top_block_timestamp();
-  uint64_t timestamp_diff = time(NULL) - top_block_timestamp;
+  uint64_t timestamp_diff = tools::GetTime() - top_block_timestamp;
 
   // genesis block has no timestamp, could probably change it to have timestamp of 1397818133...
   if(!top_block_timestamp)
-    timestamp_diff = time(NULL) - 1397818133;
+    timestamp_diff = tools::GetTime() - 1397818133;
 
   // create general purpose async service queue
 
@@ -836,6 +838,18 @@ difficulty_type Blockchain::get_difficulty_for_next_block()
   uint64_t height;
   top_hash = get_tail_id(height); // get it again now that we have the lock
   ++height; // top block height to blockchain height
+         
+  //pop-miner
+  uint8_t hf_version = get_ideal_hard_fork_version(height);
+  if (hf_version >= HF_VERSION_POP_CONSENSUS) {
+      difficulty_type diff = POP_MINE_DIFFICULTY;
+
+      CRITICAL_REGION_LOCAL1(m_difficulty_lock);
+      m_difficulty_for_next_block_top_hash = top_hash;
+      m_difficulty_for_next_block = diff;
+      return diff;
+  }
+
   // ND: Speedup
   // 1. Keep a list of the last 735 (or less) blocks that is used to compute difficulty,
   //    then when the next block difficulty is queried, push the latest height data and
@@ -1055,6 +1069,12 @@ difficulty_type Blockchain::get_next_difficulty_for_alternative_chain(const std:
   if (m_fixed_difficulty)
   {
     return m_db->height() ? m_fixed_difficulty : 1;
+  }
+
+  //pop-miner
+  uint8_t hf_version = get_ideal_hard_fork_version(bei.height);
+  if (hf_version >= HF_VERSION_POP_CONSENSUS) {
+      return POP_MINE_DIFFICULTY;
   }
 
   LOG_PRINT_L3("Blockchain::" << __func__);
@@ -1306,7 +1326,7 @@ uint64_t Blockchain::get_current_cumulative_block_weight_median() const
 // in a lot of places.  That flag is not referenced in any of the code
 // nor any of the makefiles, howeve.  Need to look into whether or not it's
 // necessary at all.
-bool Blockchain::create_block_template(block& b, const crypto::hash *from_block, const account_public_address& miner_address, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce)
+bool Blockchain::create_block_template(block& b, const crypto::hash *from_block, const account_public_address& miner_address, const crypto::secret_key& sec_key, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce, Sign_Block_Fun sign_func)
 {
   LOG_PRINT_L3("Blockchain::" << __func__);
   size_t median_weight;
@@ -1324,14 +1344,18 @@ bool Blockchain::create_block_template(block& b, const crypto::hash *from_block,
     if (!memcmp(&miner_address, &m_btc_address, sizeof(cryptonote::account_public_address)) && m_btc_nonce == ex_nonce
       && m_btc_pool_cookie == m_tx_pool.cookie() && m_btc.prev_id == get_tail_id()) {
       MDEBUG("Using cached template");
-      const uint64_t now = time(NULL);
+      const uint64_t now = tools::GetTime();
       if (m_btc.timestamp < now) // ensures it can't get below the median of the last few blocks
         m_btc.timestamp = now;
-      b = m_btc;
-      diffic = m_btc_difficulty;
-      height = m_btc_height;
-      expected_reward = m_btc_expected_reward;
-      return true;
+      //after modify block, re-sign block
+      if (sign_func(m_btc, miner_address, sec_key)) {
+          b = m_btc;
+          diffic = m_btc_difficulty;
+          height = m_btc_height;
+          expected_reward = m_btc_expected_reward;
+          return true;
+      }
+      LOG_ERROR("Failed to re-sign block");
     }
     MDEBUG("Not using cached template: address " << (!memcmp(&miner_address, &m_btc_address, sizeof(cryptonote::account_public_address))) << ", nonce " << (m_btc_nonce == ex_nonce) << ", cookie " << (m_btc_pool_cookie == m_tx_pool.cookie()) << ", from_block " << (!!from_block));
     invalidate_block_template_cache();
@@ -1403,7 +1427,7 @@ bool Blockchain::create_block_template(block& b, const crypto::hash *from_block,
     diffic = get_difficulty_for_next_block();
     already_generated_coins = m_db->get_block_already_generated_coins(height - 1);
   }
-  b.timestamp = time(NULL);
+  b.timestamp = tools::GetTime();
 
   uint64_t median_ts;
   if (!check_block_timestamp(b, median_ts))
@@ -1533,6 +1557,12 @@ bool Blockchain::create_block_template(block& b, const crypto::hash *from_block,
         ", cumulative weight " << cumulative_weight << " is now good");
 #endif
 
+    //sign block
+    if (!sign_func(b, miner_address, sec_key)) {
+        LOG_ERROR("Failed to sign block");
+        return false;
+    }
+
     if (!from_block)
       cache_block_template(b, miner_address, ex_nonce, diffic, height, expected_reward, pool_cookie);
     return true;
@@ -1541,9 +1571,9 @@ bool Blockchain::create_block_template(block& b, const crypto::hash *from_block,
   return false;
 }
 //------------------------------------------------------------------
-bool Blockchain::create_block_template(block& b, const account_public_address& miner_address, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce)
+bool Blockchain::create_block_template(block& b, const account_public_address& miner_address, const crypto::secret_key& sec_key, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce, Sign_Block_Fun sign_func)
 {
-  return create_block_template(b, NULL, miner_address, diffic, height, expected_reward, ex_nonce);
+  return create_block_template(b, NULL, miner_address, sec_key, diffic, height, expected_reward, ex_nonce, sign_func);
 }
 //------------------------------------------------------------------
 // for an alternate chain, get the timestamps from the main chain to complete
@@ -2742,7 +2772,7 @@ bool Blockchain::check_tx_outputs(const transaction& tx, tx_verification_context
   // from hard fork 2, we forbid dust and compound outputs
   if (hf_version >= 2) {
     for (auto &o: tx.vout) {
-      if (tx.version == 1)
+      if (tx.version == 1001 || tx.version == 1)
       {
         if (!is_valid_decomposed_amount(o.amount)) {
           tvc.m_invalid_output = true;
@@ -2754,7 +2784,7 @@ bool Blockchain::check_tx_outputs(const transaction& tx, tx_verification_context
 
   // in a v2 tx, all outputs must have 0 amount
   if (hf_version >= 3) {
-    if (tx.version >= 2) {
+    if (tx.version >= 1002 || (tx.version >= 2 && tx.version < 1000)) {
       for (auto &o: tx.vout) {
         if (o.amount != 0) {
           tvc.m_invalid_output = true;
@@ -2779,7 +2809,7 @@ bool Blockchain::check_tx_outputs(const transaction& tx, tx_verification_context
 
   // from v8, allow bulletproofs
   if (hf_version < 8) {
-    if (tx.version >= 2) {
+    if (tx.version >= 1002 || (tx.version >= 2 && tx.version < 1000)) {
       const bool bulletproof = rct::is_rct_bulletproof(tx.rct_signatures.type);
       if (bulletproof || !tx.rct_signatures.p.bulletproofs.empty())
       {
@@ -2792,7 +2822,7 @@ bool Blockchain::check_tx_outputs(const transaction& tx, tx_verification_context
 
   // from v9, forbid borromean range proofs
   if (hf_version > 8) {
-    if (tx.version >= 2) {
+    if (tx.version >= 1002 || (tx.version >= 2 && tx.version < 1000)) {
       const bool borromean = rct::is_rct_borromean(tx.rct_signatures.type);
       if (borromean)
       {
@@ -2805,7 +2835,7 @@ bool Blockchain::check_tx_outputs(const transaction& tx, tx_verification_context
 
   // from v10, allow bulletproofs v2
   if (hf_version < HF_VERSION_SMALLER_BP) {
-    if (tx.version >= 2) {
+    if (tx.version >= 1002 || (tx.version >= 2 && tx.version < 1000)) {
       if (tx.rct_signatures.type == rct::RCTTypeBulletproof2)
       {
         MERROR_VER("Ringct type " << (unsigned)rct::RCTTypeBulletproof2 << " is not allowed before v" << HF_VERSION_SMALLER_BP);
@@ -2817,7 +2847,7 @@ bool Blockchain::check_tx_outputs(const transaction& tx, tx_verification_context
 
   // from v11, allow only bulletproofs v2
   if (hf_version > HF_VERSION_SMALLER_BP) {
-    if (tx.version >= 2) {
+    if (tx.version >= 1002 || (tx.version >= 2 && tx.version < 1000)) {
       if (tx.rct_signatures.type == rct::RCTTypeBulletproof)
       {
         MERROR_VER("Ringct type " << (unsigned)rct::RCTTypeBulletproof << " is not allowed from v" << (HF_VERSION_SMALLER_BP + 1));
@@ -2844,7 +2874,7 @@ bool Blockchain::have_tx_keyimges_as_spent(const transaction &tx) const
 bool Blockchain::expand_transaction_2(transaction &tx, const crypto::hash &tx_prefix_hash, const std::vector<std::vector<rct::ctkey>> &pubkeys) const
 {
   PERF_TIMER(expand_transaction_2);
-  CHECK_AND_ASSERT_MES(tx.version == 2, false, "Transaction version is not 2");
+  CHECK_AND_ASSERT_MES((tx.version == 1002 || tx.version == 2), false, "Transaction version is not 2");
 
   rct::rctSig &rv = tx.rct_signatures;
 
@@ -2941,7 +2971,7 @@ bool Blockchain::check_tx_inputs(transaction& tx, tx_verification_context &tvc, 
 
   if (hf_version >= HF_VERSION_MIN_2_OUTPUTS)
   {
-    if (tx.version >= 2)
+    if (tx.version >= 1002 || (tx.version >= 2 && tx.version < 1000))
     {
       if (tx.vout.size() < 2)
       {
@@ -3026,14 +3056,14 @@ bool Blockchain::check_tx_inputs(transaction& tx, tx_verification_context &tvc, 
     }
 
     // min/max tx version based on HF, and we accept v1 txes if having a non mixable
-    const size_t max_tx_version = (hf_version <= 3) ? 1 : 2;
+    const size_t max_tx_version = (hf_version <= 3) ? 1 : (hf_version < HF_VERSION_POP_CONSENSUS ? 2 : 1002);
     if (tx.version > max_tx_version)
     {
       MERROR_VER("transaction version " << (unsigned)tx.version << " is higher than max accepted version " << max_tx_version);
       tvc.m_verifivation_failed = true;
       return false;
     }
-    const size_t min_tx_version = (n_unmixable > 0 ? 1 : (hf_version >= HF_VERSION_ENFORCE_RCT) ? 2 : 1);
+    const size_t min_tx_version = (n_unmixable > 0 ? 1 : (hf_version >= HF_VERSION_ENFORCE_RCT) ? (hf_version >= HF_VERSION_POP_CONSENSUS ? 1002 : 2) : 1);
     if (tx.version < min_tx_version)
     {
       MERROR_VER("transaction version " << (unsigned)tx.version << " is lower than min accepted version " << min_tx_version);
@@ -3091,7 +3121,7 @@ bool Blockchain::check_tx_inputs(transaction& tx, tx_verification_context &tvc, 
       return false;
     }
 
-    if (tx.version == 1)
+    if (tx.version == 1001 || tx.version == 1)
     {
       // basically, make sure number of inputs == number of signatures
       CHECK_AND_ASSERT_MES(sig_index < tx.signatures.size(), false, "wrong transaction: not signature entry for input with index= " << sig_index);
@@ -3099,7 +3129,7 @@ bool Blockchain::check_tx_inputs(transaction& tx, tx_verification_context &tvc, 
 
     // make sure that output being spent matches up correctly with the
     // signature spending it.
-    if (!check_tx_input(tx.version, in_to_key, tx_prefix_hash, tx.version == 1 ? tx.signatures[sig_index] : std::vector<crypto::signature>(), tx.rct_signatures, pubkeys[sig_index], pmax_used_block_height))
+    if (!check_tx_input(tx.version, in_to_key, tx_prefix_hash, (tx.version == 1001 || tx.version == 1) ? tx.signatures[sig_index] : std::vector<crypto::signature>(), tx.rct_signatures, pubkeys[sig_index], pmax_used_block_height))
     {
       MERROR_VER("Failed to check ring signature for tx " << get_transaction_hash(tx) << "  vin key with k_image: " << in_to_key.k_image << "  sig_index: " << sig_index);
       if (pmax_used_block_height) // a default value of NULL is used when called from Blockchain::handle_block_to_main_chain()
@@ -3110,7 +3140,7 @@ bool Blockchain::check_tx_inputs(transaction& tx, tx_verification_context &tvc, 
       return false;
     }
 
-    if (tx.version == 1)
+    if (tx.version == 1001 || tx.version == 1)
     {
       if (threads > 1)
       {
@@ -3147,7 +3177,7 @@ bool Blockchain::check_tx_inputs(transaction& tx, tx_verification_context &tvc, 
         false, "Transaction spends at least one output which is too young");
   }
 
-  if (tx.version == 1)
+  if (tx.version == 1001 || tx.version == 1)
   {
     if (threads > 1)
     {
@@ -3499,7 +3529,7 @@ bool Blockchain::is_tx_spendtime_unlocked(uint64_t unlock_time) const
   else
   {
     //interpret as time
-    uint64_t current_time = static_cast<uint64_t>(time(NULL));
+    uint64_t current_time = static_cast<uint64_t>(tools::GetTime());
     if(current_time + (get_current_hard_fork_version() < 2 ? CRYPTONOTE_LOCKED_TX_ALLOWED_DELTA_SECONDS_V1 : CRYPTONOTE_LOCKED_TX_ALLOWED_DELTA_SECONDS_V2) >= unlock_time)
       return true;
     else
@@ -3573,7 +3603,7 @@ uint64_t Blockchain::get_adjusted_time() const
 {
   LOG_PRINT_L3("Blockchain::" << __func__);
   //TODO: add collecting median time
-  return time(NULL);
+  return tools::GetTime();
 }
 //------------------------------------------------------------------
 //TODO: revisit, has changed a bit on upstream
@@ -5029,7 +5059,7 @@ void Blockchain::cancel()
 }
 
 #if defined(PER_BLOCK_CHECKPOINT)
-static const char expected_block_hashes_hash[] = "bd0028887df452e58655a68015f74b923f29e9829b0b2c030d64feee67a2f537";
+static const char expected_block_hashes_hash[] = "fce1dc7c17f7679f5f447df206b8f5fe2ef6b1a2845e59f650850a0ef00d265f";
 void Blockchain::load_compiled_in_block_hashes(const GetCheckpointsCallback& get_checkpoints)
 {
   if (get_checkpoints == nullptr || !m_fast_sync)
@@ -5177,6 +5207,18 @@ void Blockchain::cache_block_template(const block &b, const cryptonote::account_
   m_btc_expected_reward = expected_reward;
   m_btc_pool_cookie = pool_cookie;
   m_btc_valid = true;
+}
+
+uint64_t Blockchain::POP_FORK_HEIGHT() const
+{
+    uint64_t height = m_hardfork->get_earliest_ideal_height_for_version(HF_VERSION_POP_CONSENSUS);
+    return height;
+    // std::numeric_limits<uint64_t>::max();
+}
+
+uint8_t Blockchain::get_ideal_version(uint64_t height) const
+{
+    return m_hardfork->get_ideal_version(height);
 }
 
 namespace cryptonote {

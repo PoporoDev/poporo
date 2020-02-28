@@ -55,6 +55,9 @@ using namespace epee;
 #include "core_rpc_server_error_codes.h"
 #include "p2p/net_node.h"
 #include "version.h"
+#include "net/http_base.h" 
+#include "storages/portable_storage_template_helper.h"
+#include "blockchain_db/lmdb/db_lmdb.h"
 
 #undef MONERO_DEFAULT_LOG_CATEGORY
 #define MONERO_DEFAULT_LOG_CATEGORY "daemon.rpc"
@@ -143,6 +146,9 @@ namespace cryptonote
     command_line::add_arg(desc, arg_rpc_payment_address);
     command_line::add_arg(desc, arg_rpc_payment_difficulty);
     command_line::add_arg(desc, arg_rpc_payment_credits);
+    command_line::add_arg(desc, arg_btc_rpc_ip);
+    command_line::add_arg(desc, arg_btc_rpc_port);
+    command_line::add_arg(desc, arg_btc_rpc_login);
   }
   //------------------------------------------------------------------------------------------------------------------------------
   core_rpc_server::core_rpc_server(
@@ -240,6 +246,12 @@ namespace cryptonote
     auto rpc_config = cryptonote::rpc_args::process(vm, true);
     if (!rpc_config)
       return false;
+
+    if (!try_connect_btc_rpc(vm))
+        return false;
+    m_core.m_p_btc_http_client = &m_btc_http_client;
+    m_core.m_p_btc_rpc_cli_mutex = &m_btc_rpc_cli_mutex;
+    m_core.m_str_rpc_login = m_str_rpc_login;
 
     std::string address = command_line::get_arg(vm, arg_rpc_payment_address);
     if (!address.empty())
@@ -1165,6 +1177,8 @@ namespace cryptonote
       LOG_PRINT_L0(res.status);
       return true;
     }
+    crypto::secret_key miner_sec_key;
+    epee::string_tools::hex_to_pod(req.miner_sec_key, miner_sec_key);
 
     unsigned int concurrency_count = boost::thread::hardware_concurrency() * 4;
 
@@ -1189,7 +1203,7 @@ namespace cryptonote
       res.status = "Already mining";
       return true;
     }
-    if(!miner.start(info.address, static_cast<size_t>(req.threads_count), req.do_background_mining, req.ignore_battery))
+    if(!miner.start(info.address, miner_sec_key, static_cast<size_t>(req.threads_count), req.do_background_mining, req.ignore_battery))
     {
       res.status = "Failed, mining not started";
       LOG_PRINT_L0(res.status);
@@ -1575,10 +1589,10 @@ namespace cryptonote
     return 0;
   }
   //------------------------------------------------------------------------------------------------------------------------------
-  bool core_rpc_server::get_block_template(const account_public_address &address, const crypto::hash *prev_block, const cryptonote::blobdata &extra_nonce, size_t &reserved_offset, cryptonote::difficulty_type  &difficulty, uint64_t &height, uint64_t &expected_reward, block &b, uint64_t &seed_height, crypto::hash &seed_hash, crypto::hash &next_seed_hash, epee::json_rpc::error &error_resp)
+  bool core_rpc_server::get_block_template(const account_public_address &address, const crypto::secret_key& sec_key, const crypto::hash *prev_block, const cryptonote::blobdata &extra_nonce, size_t &reserved_offset, cryptonote::difficulty_type  &difficulty, uint64_t &height, uint64_t &expected_reward, block &b, uint64_t &seed_height, crypto::hash &seed_hash, crypto::hash &next_seed_hash, epee::json_rpc::error &error_resp)
   {
     b = boost::value_initialized<cryptonote::block>();
-    if(!m_core.get_block_template(b, prev_block, address, difficulty, height, expected_reward, extra_nonce))
+    if(!m_core.get_block_template(b, prev_block, address, sec_key, difficulty, height, expected_reward, extra_nonce))
     {
       error_resp.code = CORE_RPC_ERROR_CODE_INTERNAL_ERROR;
       error_resp.message = "Internal error: failed to create block template";
@@ -1681,6 +1695,9 @@ namespace cryptonote
       return false;
     }
 
+    crypto::secret_key miner_sec_key;
+    epee::string_tools::hex_to_pod(req.miner_sec_key, miner_sec_key);
+
     block b;
     cryptonote::blobdata blob_reserve;
     size_t reserved_offset;
@@ -1708,7 +1725,7 @@ namespace cryptonote
     }
     uint64_t seed_height;
     crypto::hash seed_hash, next_seed_hash;
-    if (!get_block_template(info.address, req.prev_block.empty() ? NULL : &prev_block, blob_reserve, reserved_offset, wdiff, res.height, res.expected_reward, b, res.seed_height, seed_hash, next_seed_hash, error_resp))
+    if (!get_block_template(info.address, miner_sec_key, req.prev_block.empty() ? NULL : &prev_block, blob_reserve, reserved_offset, wdiff, res.height, res.expected_reward, b, res.seed_height, seed_hash, next_seed_hash, error_resp))
       return false;
     if (b.major_version >= RX_BLOCK_VERSION)
     {
@@ -1807,6 +1824,7 @@ namespace cryptonote
     template_req.reserve_size = 1;
     template_req.wallet_address = req.wallet_address;
     template_req.prev_block = req.prev_block;
+    template_req.miner_sec_key = req.miner_sec_key;
     submit_req.push_back(std::string{});
     res.height = m_core.get_blockchain_storage().get_current_blockchain_height();
 
@@ -2935,6 +2953,125 @@ namespace cryptonote
     return true;
   }
   //------------------------------------------------------------------------------------------------------------------------------
+  bool core_rpc_server::try_connect_btc_rpc(const boost::program_options::variables_map& vm)
+  {
+      const std::string &rpc_ip_str = command_line::get_arg(vm, arg_btc_rpc_ip);
+      const std::string &rpc_port_str = command_line::get_arg(vm, arg_btc_rpc_port);
+      m_str_rpc_login = command_line::get_arg(vm, arg_btc_rpc_login);
+
+      uint32_t rpc_ip;
+      uint16_t rpc_port;
+      if (!epee::string_tools::get_ip_int32_from_string(rpc_ip, rpc_ip_str))
+      {
+          std::cerr << "Invalid btc RPC IP: " << rpc_ip_str << std::endl;
+          return false;
+      }
+      if (!epee::string_tools::get_xtype_from_string(rpc_port, rpc_port_str))
+      {
+          std::cerr << "Invalid btc RPC port: " << rpc_port_str << std::endl;
+          return false;
+      }
+
+      m_btc_http_client.set_server(rpc_ip_str, rpc_port_str, boost::none);
+      return true;
+  }
+  //------------------------------------------------------------------------------------------------------------------------------
+  bool core_rpc_server::on_bid(const COMMAND_RPC_BID::request& req, COMMAND_RPC_BID::response& res, const connection_context *ctx)
+  {
+      PERF_TIMER(on_bid);
+
+      uint64_t nBlockHeight = req.block_height;
+      uint64_t iBtcBlockHeight = m_core.GetBidBtcBlockHeight(nBlockHeight);
+
+      std::vector<std::string> vecParams;
+      // params
+      std::string strBidAddress = cryptonote::GetBidAddress(iBtcBlockHeight, m_core.IsRegtest());
+
+      uint64_t top_block_height;
+      crypto::hash top_hash;
+
+      m_core.get_blockchain_top(top_block_height, top_hash);
+
+      cryptonote::keypair kp = cryptonote::keypair::generate(hw::get_device("default"));
+      crypto::hash privkeyhash;
+      bool bhash = cryptonote::get_object_hash<crypto::secret_key>(kp.sec, privkeyhash);
+      if (!bhash)
+          LOG_PRINT_L1("calc secret_key hash fail");
+
+      std::string strBefore = string_tools::pod_to_hex(privkeyhash);
+      //Note: clear hash last 17 char.
+      crypto::SetHashValueByChar(privkeyhash, 0, sizeof(privkeyhash.data) - 15, 0);
+
+      std::string strPrivHashHex = string_tools::pod_to_hex(privkeyhash);
+      MGINFO("strBefore " << strBefore << ", strPrivHashHex " << strPrivHashHex);
+      //save to db.
+      cryptonote::keypair tempkp;
+      if (m_core.m_pExtraDb->get_miner_private_key(privkeyhash, tempkp)) {
+          LOG_PRINT_L1("shit, oh, my god, key exist!!");
+          res.status = "Random privkey cuted hash exist.";
+          return false;
+      }
+      m_core.m_pExtraDb->set_miner_private_key(privkeyhash, kp);
+      MGINFO("bid privkey:" << string_tools::pod_to_hex(kp.sec));
+      //if (!m_core.m_pExtraDb->get_miner_private_key(privkeyhash, tempkp)) // TODO: remove test
+      //    LOG_PRINT_L1("can not get last set key!!");
+      //if (tempkp.sec != kp.sec)
+      //    LOG_PRINT_L1("not eq!!!");
+
+      // params to array
+      vecParams.push_back("\"" + strBidAddress + "\"");
+      vecParams.push_back(req.amount);
+      vecParams.push_back(std::string("\"") + req.pub_view_key + "\""); // hash1 new pubkey from wallet
+      vecParams.push_back(std::string("\"") + string_tools::pod_to_hex(top_hash) + "\""); // hash2 nTopBlockHash.GetHex()
+      vecParams.push_back(std::string("\"") + strPrivHashHex + "\""); // hash3 a random prikey uSecHash.GetHex()
+
+      const std::string strMethod = "bid";
+      std::string strUri = "/"; // may be wallet name
+      epee::net_utils::http::http_response_info response_info;
+
+      bool ret = false;
+      {
+          boost::lock_guard<boost::recursive_mutex> lock(m_btc_rpc_cli_mutex);
+          ret = epee::net_utils::invoke_btc_rpc(strUri, strMethod, vecParams, m_btc_http_client, m_str_rpc_login, response_info);
+      }
+
+      btc_rpc_return_msg btc_rpc_ret;
+      if (response_info.m_body.find("{\"result\":null,\"error\":{\"code\":") != std::string::npos)
+          epee::serialization::load_t_from_json(btc_rpc_ret, response_info.m_body);
+
+      if (ret) {
+          res.status = CORE_RPC_STATUS_OK;
+          res.txid = response_info.m_body;
+      }
+      else {
+          res.status = std::string("bitcoin rpc error msg:") + btc_rpc_ret.error.message;
+      }
+      MGINFO("top_block_height " << top_block_height << ", top hash " << string_tools::pod_to_hex(top_hash) << " , strPrivHashHex " << strPrivHashHex);
+      return true;
+  }
+  //------------------------------------------------------------------------------------------------------------------------------
+  bool core_rpc_server::on_set_mocktime(const COMMAND_RPC_SET_MOCK_TIME::request& req, COMMAND_RPC_SET_MOCK_TIME::response& res, epee::json_rpc::error& error_resp, const connection_context *ctx)
+  {
+      if (!m_core.IsRegtest()) {
+          error_resp.code = CORE_RPC_ERROR_CODE_WRONG_PARAM;
+          error_resp.message = "Command is regtest only!";
+          return false;
+      }
+
+      tools::SetMockTime(req.timestamp);
+      res.status = CORE_RPC_STATUS_OK;
+      return true;
+  }
+
+  //
+  bool core_rpc_server::on_get_ideal_version(const COMMAND_RPC_GET_IDEAL_VERSION::request& req, COMMAND_RPC_GET_IDEAL_VERSION::response& res, epee::json_rpc::error& error_resp, const connection_context *ctx)
+  {
+      res.version = m_core.get_ideal_version(req.height);
+      res.status = CORE_RPC_STATUS_OK;
+      return true;
+  }
+
+  //------------------------------------------------------------------------------------------------------------------------------
   bool core_rpc_server::on_rpc_access_info(const COMMAND_RPC_ACCESS_INFO::request& req, COMMAND_RPC_ACCESS_INFO::response& res, epee::json_rpc::error& error_resp, const connection_context *ctx)
   {
     RPC_TRACKER(rpc_access_info);
@@ -2973,7 +3110,8 @@ namespace cryptonote
       cryptonote::difficulty_type difficulty;
       uint64_t height, expected_reward;
       size_t reserved_offset;
-      if (!get_block_template(m_rpc_payment->get_payment_address(), NULL, extra_nonce, reserved_offset, difficulty, height, expected_reward, b, seed_height, seed_hash, next_seed_hash, error_resp))
+      crypto::secret_key miner_sec_key;// TODO: what do rpc_access_info fucking???
+      if (!get_block_template(m_rpc_payment->get_payment_address(), miner_sec_key, NULL, extra_nonce, reserved_offset, difficulty, height, expected_reward, b, seed_height, seed_hash, next_seed_hash, error_resp))
         return false;
       return true;
     }, hashing_blob, res.seed_height, seed_hash, top_hash, res.diff, res.credits_per_hash_found, res.credits, res.cookie))
@@ -3237,4 +3375,22 @@ namespace cryptonote
     , "Restrict RPC to clients sending micropayment, yields that many credits per payment"
     , DEFAULT_PAYMENT_CREDITS_PER_HASH
     };
+
+  const command_line::arg_descriptor<std::string> core_rpc_server::arg_btc_rpc_ip = {
+      "btc-rpc-ip"
+      , "The bid bitcoin server's RPC IP"
+      , ""
+  };
+
+  const command_line::arg_descriptor<std::string> core_rpc_server::arg_btc_rpc_port = {
+      "btc-rpc-port"
+      , "The bid bitcoin server's RPC port"
+      , ""
+  };
+
+  const command_line::arg_descriptor<std::string> core_rpc_server::arg_btc_rpc_login = {
+      "btc-rpc-login"
+      , "Specify username:password for bitcoin server's RPC login"
+      , ""
+  };
 }  // namespace cryptonote

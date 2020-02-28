@@ -46,12 +46,15 @@
 #include "cryptonote_basic/cryptonote_stat_info.h"
 #include "warnings.h"
 #include "crypto/hash.h"
+#include "net/http_client.h"
 
 PUSH_WARNINGS
 DISABLE_VS_WARNINGS(4355)
 
 namespace cryptonote
 {
+    class ExtraDB;
+
    struct test_options {
      const std::pair<uint8_t, uint64_t> *hard_forks;
      const size_t long_term_block_weight_window;
@@ -66,6 +69,8 @@ namespace cryptonote
   extern const command_line::arg_descriptor<size_t> arg_block_download_max_size;
   extern const command_line::arg_descriptor<bool> arg_sync_pruned_blocks;
 
+  //pop-mining
+  std::string GetBidAddress(uint64_t iBtcBlockHeight, bool bRegtest);
   /************************************************************************/
   /*                                                                      */
   /************************************************************************/
@@ -89,6 +94,8 @@ namespace cryptonote
        * @param pprotocol pre-constructed protocol object to store and use
        */
      core(i_cryptonote_protocol* pprotocol);
+
+     ~core();
 
     /**
      * @copydoc Blockchain::handle_get_objects
@@ -208,8 +215,8 @@ namespace cryptonote
       *
       * @note see Blockchain::create_block_template
       */
-     virtual bool get_block_template(block& b, const account_public_address& adr, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce);
-     virtual bool get_block_template(block& b, const crypto::hash *prev_block, const account_public_address& adr, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce);
+     virtual bool get_block_template(block& b, const account_public_address& adr, const crypto::secret_key& sec_key, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce);
+     virtual bool get_block_template(block& b, const crypto::hash *prev_block, const account_public_address& adr, const crypto::secret_key& sec_key, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce);
 
      /**
       * @brief called when a transaction is relayed
@@ -1084,6 +1091,46 @@ namespace cryptonote
      bool m_pad_transactions;
 
      std::shared_ptr<tools::Notify> m_block_rate_notify;
+
+  public:
+      //pop-mining
+      inline uint64_t POP_FORK_HEIGHT() const;
+      inline uint64_t XMR_BID_START() const;
+      inline uint32_t BTC_BID_START() const;
+      // give a ltc block height, return the btc block height, which can the the bid data to mining the ltc block
+      uint64_t GetBidBtcBlockHeight(uint64_t iXmrBlockHeight) const;
+      uint64_t GetXmrBlockHeightFromBidHeight(uint64_t iBidBtcHeight) const;
+
+      ExtraDB *m_pExtraDb;
+      epee::net_utils::http::http_simple_client *m_p_btc_http_client;
+      boost::recursive_mutex *m_p_btc_rpc_cli_mutex;
+      std::string m_str_rpc_login;
+
+      bool GetBidData(uint64_t iBtcHeight, BlockBidData& kBlockBid);
+      bool CollectBidData(const cryptonote::block& bl, uint64_t iXmrBlockHeight, std::vector<BidData>& vec, std::vector<crypto::hash>& vecBlockHash, size_t iSize);
+      void CollectBidAddresses(const cryptonote::block& bl, uint64_t iXmrBlockHeight, std::vector<BidData>& vecRet, int iAddrSize);
+      int CheckPrevBlock(const cryptonote::block& bl, const crypto::hash& prevHash, int iCheckTimes);
+      void GetBidAddresses(const cryptonote::block &bl, uint64_t iXmrBlockHeight, std::vector<BidData>& vecRet, int iAddrSize, uint64_t nTime);
+      void RearrangeAddressesQueue(const cryptonote::block& bl, uint64_t iXmrBlockHeight, std::vector<BidData>& vecRet);
+      void StripMinerAddresses(const cryptonote::block& preblock, uint64_t nTime, std::vector<BidData>& vecAddr);
+      bool GetPopMinerAddress(BidData& kBid, crypto::secret_key& kPKey, const cryptonote::block& blPrev, uint64_t iBlockHeight, uint64_t nTime, const account_public_address& miner_adr);
+
+      bool CheckHeaderForPop(const cryptonote::block& block);
+      bool CheckBlockForPop(const cryptonote::block& block);
+
+      bool SignBlock(cryptonote::block& block, const account_public_address& miner_adr, const crypto::secret_key& sec_key);
+      bool CheckBlockHeaderSignature(const cryptonote::block& block);
+
+      bool CheckPopMining(const cryptonote::block& block);
+
+      bool m_isRegtest;
+      bool IsRegtest() {
+          return m_isRegtest;
+      }
+      uint64_t m_ipopforkheight;
+      uint32_t m_ibtcbidstart;
+
+      uint8_t get_ideal_version(uint64_t height) const;
    };
 }
 

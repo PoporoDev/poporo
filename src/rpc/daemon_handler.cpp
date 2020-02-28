@@ -394,6 +394,8 @@ namespace rpc
       res.status = Message::STATUS_FAILED;
       return;
     }
+    crypto::secret_key miner_sec_key;
+    epee::string_tools::hex_to_pod(req.miner_sec_key, miner_sec_key);
 
     unsigned int concurrency_count = boost::thread::hardware_concurrency() * 4;
 
@@ -413,7 +415,7 @@ namespace rpc
       return;
     }
 
-    if(!m_core.get_miner().start(info.address, static_cast<size_t>(req.threads_count), req.do_background_mining, req.ignore_battery))
+    if(!m_core.get_miner().start(info.address, miner_sec_key, static_cast<size_t>(req.threads_count), req.do_background_mining, req.ignore_battery))
     {
       res.error_details = "Failed, mining not started";
       LOG_PRINT_L0(res.error_details);

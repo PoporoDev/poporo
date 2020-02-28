@@ -617,13 +617,15 @@ namespace cryptonote
       uint64_t    threads_count;
       bool        do_background_mining;
       bool        ignore_battery;
+      std::string miner_sec_key; // use to pop-mining block signature
 
       BEGIN_KV_SERIALIZE_MAP()
         KV_SERIALIZE_PARENT(rpc_request_base)
         KV_SERIALIZE(miner_address)
         KV_SERIALIZE(threads_count)
-        KV_SERIALIZE(do_background_mining)        
-        KV_SERIALIZE(ignore_battery)        
+        KV_SERIALIZE(do_background_mining)
+        KV_SERIALIZE(ignore_battery)
+        KV_SERIALIZE(miner_sec_key)
       END_KV_SERIALIZE_MAP()
     };
     typedef epee::misc_utils::struct_init<request_t> request;
@@ -887,6 +889,7 @@ namespace cryptonote
       std::string wallet_address;
       std::string prev_block;
       std::string extra_nonce;
+      std::string miner_sec_key;
 
       BEGIN_KV_SERIALIZE_MAP()
         KV_SERIALIZE_PARENT(rpc_request_base)
@@ -894,6 +897,7 @@ namespace cryptonote
         KV_SERIALIZE(wallet_address)
         KV_SERIALIZE(prev_block)
         KV_SERIALIZE(extra_nonce)
+        KV_SERIALIZE(miner_sec_key)
       END_KV_SERIALIZE_MAP()
     };
     typedef epee::misc_utils::struct_init<request_t> request;
@@ -953,6 +957,7 @@ namespace cryptonote
       std::string wallet_address;
       std::string prev_block;
       uint32_t starting_nonce;
+      std::string miner_sec_key;
 
       BEGIN_KV_SERIALIZE_MAP()
         KV_SERIALIZE_PARENT(rpc_request_base)
@@ -960,6 +965,7 @@ namespace cryptonote
         KV_SERIALIZE(wallet_address)
         KV_SERIALIZE(prev_block)
         KV_SERIALIZE_OPT(starting_nonce, (uint32_t)0)
+        KV_SERIALIZE(miner_sec_key)
       END_KV_SERIALIZE_MAP()
     };
     typedef epee::misc_utils::struct_init<request_t> request;
@@ -2577,4 +2583,143 @@ namespace cryptonote
     typedef epee::misc_utils::struct_init<response_t> response;
   };
 
+  struct COMMAND_RPC_SET_MOCK_TIME {
+      struct request_t
+      {
+          int64_t timestamp;
+
+          BEGIN_KV_SERIALIZE_MAP()
+              KV_SERIALIZE(timestamp)
+          END_KV_SERIALIZE_MAP()
+      };
+      typedef epee::misc_utils::struct_init<request_t> request;
+
+      struct response_t
+      {
+          std::string status;
+
+          BEGIN_KV_SERIALIZE_MAP()
+              KV_SERIALIZE(status)
+          END_KV_SERIALIZE_MAP()
+      };
+      typedef epee::misc_utils::struct_init<response_t> response;
+  };
+
+  struct COMMAND_RPC_GET_IDEAL_VERSION {
+      struct request_t
+      {
+          uint64_t height;
+
+          BEGIN_KV_SERIALIZE_MAP()
+              KV_SERIALIZE(height)
+          END_KV_SERIALIZE_MAP()
+      };
+      typedef epee::misc_utils::struct_init<request_t> request;
+
+      struct response_t
+      {
+          std::string status;
+          uint8_t version;
+
+          BEGIN_KV_SERIALIZE_MAP()
+              KV_SERIALIZE(status)
+              KV_SERIALIZE(version)
+          END_KV_SERIALIZE_MAP()
+      };
+      typedef epee::misc_utils::struct_init<response_t> response;
+  };
+
+  //btc error return
+  //{
+  //    "result": null,
+  //    "error" : {
+  //        "code": -5,
+  //        "message" : "Block not found"
+  //    },
+  //    "id" : "curltest"
+  //}
+  struct BTC_RPC_RETURN_MSG
+  {
+      std::string result;
+      struct btc_error
+      {
+          int code;
+          std::string message;
+          BEGIN_KV_SERIALIZE_MAP()
+              KV_SERIALIZE_OPT(code, 0)
+              KV_SERIALIZE_OPT(message, (std::string)"")
+          END_KV_SERIALIZE_MAP()
+      };
+      btc_error error;
+      int id;
+
+      BEGIN_KV_SERIALIZE_MAP()
+          KV_SERIALIZE_OPT(result, (std::string)"")
+          KV_SERIALIZE(error)
+          KV_SERIALIZE_OPT(id, (int)0)
+      END_KV_SERIALIZE_MAP()
+  };
+  typedef epee::misc_utils::struct_init<BTC_RPC_RETURN_MSG> btc_rpc_return_msg;
+
+  struct COMMAND_RPC_BID
+  {
+      struct request_t
+      {
+          std::string amount;
+          uint64_t block_height;
+          std::string pub_view_key;
+          BEGIN_KV_SERIALIZE_MAP()
+              KV_SERIALIZE(amount)
+              KV_SERIALIZE(block_height)
+              KV_SERIALIZE(pub_view_key)
+          END_KV_SERIALIZE_MAP()
+      };
+      typedef epee::misc_utils::struct_init<request_t> request;
+
+      struct response_t
+      {
+          std::string txid;
+          std::string status;
+
+          BEGIN_KV_SERIALIZE_MAP()
+              KV_SERIALIZE(txid)
+              KV_SERIALIZE(status)
+          END_KV_SERIALIZE_MAP()
+      };
+      typedef epee::misc_utils::struct_init<response_t> response;
+  };
+
+  struct BTC_GETBID_RETURN_DATA {
+      struct result {
+          struct bid_data {
+              uint64_t amount;
+              std::vector<std::string> hashs;
+
+              BEGIN_KV_SERIALIZE_MAP()
+                  KV_SERIALIZE(amount)
+                  KV_SERIALIZE(hashs)
+              END_KV_SERIALIZE_MAP()
+          };
+          std::vector<std::string> hashes;
+          std::vector<bid_data> bids; //[[number,string[,string...]]]
+          uint64_t time;
+
+          BEGIN_KV_SERIALIZE_MAP()
+              KV_SERIALIZE(hashes) //block hashs
+              KV_SERIALIZE(bids)
+              KV_SERIALIZE(time)
+          END_KV_SERIALIZE_MAP()
+      };
+
+      result result;
+      BTC_RPC_RETURN_MSG::btc_error error;
+      int32_t id;
+
+      BEGIN_KV_SERIALIZE_MAP()
+          KV_SERIALIZE(result) //block hashs
+          KV_SERIALIZE(error)
+          KV_SERIALIZE(id)
+      END_KV_SERIALIZE_MAP()
+  };
+  typedef epee::misc_utils::struct_init<BTC_GETBID_RETURN_DATA> btc_getbid_data;
 }

@@ -75,6 +75,9 @@ namespace cryptonote
     static const command_line::arg_descriptor<std::string> arg_rpc_payment_address;
     static const command_line::arg_descriptor<uint64_t> arg_rpc_payment_difficulty;
     static const command_line::arg_descriptor<uint64_t> arg_rpc_payment_credits;
+    static const command_line::arg_descriptor<std::string> arg_btc_rpc_ip;
+    static const command_line::arg_descriptor<std::string> arg_btc_rpc_port;
+    static const command_line::arg_descriptor<std::string> arg_btc_rpc_login;
 
     typedef epee::net_utils::connection_context_base connection_context;
 
@@ -137,6 +140,7 @@ namespace cryptonote
       MAP_URI_AUTO_JON2_IF("/update", on_update, COMMAND_RPC_UPDATE, !m_restricted)
       MAP_URI_AUTO_BIN2("/get_output_distribution.bin", on_get_output_distribution_bin, COMMAND_RPC_GET_OUTPUT_DISTRIBUTION)
       MAP_URI_AUTO_JON2_IF("/pop_blocks", on_pop_blocks, COMMAND_RPC_POP_BLOCKS, !m_restricted)
+      MAP_URI_AUTO_JON2("/bid", on_bid, COMMAND_RPC_BID)
       BEGIN_JSON_RPC_MAP("/json_rpc")
         MAP_JON_RPC("get_block_count",           on_getblockcount,              COMMAND_RPC_GETBLOCKCOUNT)
         MAP_JON_RPC("getblockcount",             on_getblockcount,              COMMAND_RPC_GETBLOCKCOUNT)
@@ -181,6 +185,8 @@ namespace cryptonote
         MAP_JON_RPC_WE_IF("rpc_access_tracking", on_rpc_access_tracking,        COMMAND_RPC_ACCESS_TRACKING, !m_restricted)
         MAP_JON_RPC_WE_IF("rpc_access_data",     on_rpc_access_data,            COMMAND_RPC_ACCESS_DATA, !m_restricted)
         MAP_JON_RPC_WE_IF("rpc_access_account",  on_rpc_access_account,         COMMAND_RPC_ACCESS_ACCOUNT, !m_restricted)
+        MAP_JON_RPC_WE("setmocktime", on_set_mocktime, COMMAND_RPC_SET_MOCK_TIME)
+        MAP_JON_RPC_WE("get_ideal_version", on_get_ideal_version, COMMAND_RPC_GET_IDEAL_VERSION)
       END_JSON_RPC_MAP()
     END_URI_MAP2()
 
@@ -220,6 +226,10 @@ namespace cryptonote
     bool on_get_output_distribution_bin(const COMMAND_RPC_GET_OUTPUT_DISTRIBUTION::request& req, COMMAND_RPC_GET_OUTPUT_DISTRIBUTION::response& res, const connection_context *ctx = NULL);
     bool on_pop_blocks(const COMMAND_RPC_POP_BLOCKS::request& req, COMMAND_RPC_POP_BLOCKS::response& res, const connection_context *ctx = NULL);
     
+    bool on_bid(const COMMAND_RPC_BID::request& req, COMMAND_RPC_BID::response& res, const connection_context *ctx = NULL);
+    bool on_set_mocktime(const COMMAND_RPC_SET_MOCK_TIME::request& req, COMMAND_RPC_SET_MOCK_TIME::response& res, epee::json_rpc::error& error_resp, const connection_context *ctx = NULL);
+    bool on_get_ideal_version(const COMMAND_RPC_GET_IDEAL_VERSION::request& req, COMMAND_RPC_GET_IDEAL_VERSION::response& res, epee::json_rpc::error& error_resp, const connection_context *ctx = NULL);
+
     //json_rpc
     bool on_getblockcount(const COMMAND_RPC_GETBLOCKCOUNT::request& req, COMMAND_RPC_GETBLOCKCOUNT::response& res, const connection_context *ctx = NULL);
     bool on_getblockhash(const COMMAND_RPC_GETBLOCKHASH::request& req, COMMAND_RPC_GETBLOCKHASH::response& res, epee::json_rpc::error& error_resp, const connection_context *ctx = NULL);
@@ -271,7 +281,7 @@ private:
     enum invoke_http_mode { JON, BIN, JON_RPC };
     template <typename COMMAND_TYPE>
     bool use_bootstrap_daemon_if_necessary(const invoke_http_mode &mode, const std::string &command_name, const typename COMMAND_TYPE::request& req, typename COMMAND_TYPE::response& res, bool &r);
-    bool get_block_template(const account_public_address &address, const crypto::hash *prev_block, const cryptonote::blobdata &extra_nonce, size_t &reserved_offset, cryptonote::difficulty_type &difficulty, uint64_t &height, uint64_t &expected_reward, block &b, uint64_t &seed_height, crypto::hash &seed_hash, crypto::hash &next_seed_hash, epee::json_rpc::error &error_resp);
+    bool get_block_template(const account_public_address &address, const crypto::secret_key& sec_key, const crypto::hash *prev_block, const cryptonote::blobdata &extra_nonce, size_t &reserved_offset, cryptonote::difficulty_type &difficulty, uint64_t &height, uint64_t &expected_reward, block &b, uint64_t &seed_height, crypto::hash &seed_hash, crypto::hash &next_seed_hash, epee::json_rpc::error &error_resp);
     bool check_payment(const std::string &client, uint64_t payment, const std::string &rpc, bool same_ts, std::string &message, uint64_t &credits, std::string &top_hash);
     
     core& m_core;
@@ -285,6 +295,11 @@ private:
     epee::critical_section m_host_fails_score_lock;
     std::map<std::string, uint64_t> m_host_fails_score;
     std::unique_ptr<rpc_payment> m_rpc_payment;
+
+    bool try_connect_btc_rpc(const boost::program_options::variables_map& vm);
+    epee::net_utils::http::http_simple_client m_btc_http_client;
+    boost::recursive_mutex m_btc_rpc_cli_mutex;
+    std::string m_str_rpc_login; //
   };
 }
 

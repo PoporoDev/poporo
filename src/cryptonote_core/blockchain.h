@@ -85,6 +85,8 @@ namespace cryptonote
    */
   typedef std::function<const epee::span<const unsigned char>(cryptonote::network_type network)> GetCheckpointsCallback;
 
+  // fun as core::SignBlock
+  typedef std::function<bool(block&, const account_public_address& miner_adr, const crypto::secret_key& sec_key)> Sign_Block_Fun;
   /************************************************************************/
   /*                                                                      */
   /************************************************************************/
@@ -346,8 +348,8 @@ namespace cryptonote
      *
      * @return true if block template filled in successfully, else false
      */
-    bool create_block_template(block& b, const account_public_address& miner_address, difficulty_type& di, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce);
-    bool create_block_template(block& b, const crypto::hash *from_block, const account_public_address& miner_address, difficulty_type& di, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce);
+    bool create_block_template(block& b, const account_public_address& miner_address, const crypto::secret_key& sec_key, difficulty_type& di, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce, Sign_Block_Fun sign_func);
+    bool create_block_template(block& b, const crypto::hash *from_block, const account_public_address& miner_address, const crypto::secret_key& sec_key, difficulty_type& di, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce, Sign_Block_Fun sign_func);
 
     /**
      * @brief checks if a block is known about with a given hash
@@ -844,6 +846,9 @@ namespace cryptonote
      */
     uint64_t get_difficulty_target() const;
 
+    //pop-mining
+    uint64_t POP_FORK_HEIGHT() const;
+
     /**
      * @brief remove transactions from the transaction pool (if present)
      *
@@ -1000,6 +1005,8 @@ namespace cryptonote
      * @param nblocks number of blocks to be removed
      */
     void pop_blocks(uint64_t nblocks);
+
+    uint8_t get_ideal_version(uint64_t height) const;
 
     /**
      * @brief checks whether a given block height is included in the precompiled block hash area
