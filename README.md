@@ -74,6 +74,8 @@ Since Bitcoin has been running for a long time, and POW consensus algorithm has 
 ## Difference from Monero
 **Consensus:** Poporo adopted a new POP consensus algorithm, which is utility the security of the Bitcoin, and to avoid the repetedly change of consensus algorithm of Monero, to avoid the using of ASIC mining machines.
 
+**Remove of Tail Emission:** As the POP consensus algorithm adopted, the security of blockchain is guaranteed by the hash power of Bitcoin,  and the mining of Poporo doesn't have the heavy power consumption, so there was no need the Tail Emission feature to encourage the poporo miners to mining blocks. The remove of Tail Emission will make poporo a absolutely deflationary economic model and the total supply of Poporo is less than 18 millions.
+
 **Replay Protection:** Poporo added the replay protection of the transaction, to avoid the replay attack for the Poporo. Which will let user lose the Poporo if he spended the Monero in the same address of Poporo, and vice versa.
 
 
