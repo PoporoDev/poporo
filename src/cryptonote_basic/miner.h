@@ -41,13 +41,22 @@
 #include <windows.h>
 #endif
 
+//pop-mining
+static const int32_t MINER_SIZE_FOR_POP = 20;
+static const uint32_t BLOCK_FOR_RAND_SEED = 360; // 12 hours * 30 block per hours
+static const uint32_t BTC_TO_XMR_BLOCK_TIMES = 5;
+static const uint32_t BTC_BID_START = 621012;
+#define BID_WAIT 720 // 24 * 30 ( 24 hours * 30 block per hours )
+//static const uint32_t POP_FORK_HEIGHT = 1000; // different nettype the height is different
+//static const uint32_t XMR_BID_START = POP_FORK_HEIGHT - BID_WAIT; // biding fefore a day ( 24 hours * 30 block per hours )
+
 namespace cryptonote
 {
 
   struct i_miner_handler
   {
     virtual bool handle_block_found(block& b, block_verification_context &bvc) = 0;
-    virtual bool get_block_template(block& b, const account_public_address& adr, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce) = 0;
+    virtual bool get_block_template(block& b, const account_public_address& adr, const crypto::secret_key& sec_key, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce) = 0;
   protected:
     ~i_miner_handler(){};
   };
@@ -66,13 +75,14 @@ namespace cryptonote
     static void init_options(boost::program_options::options_description& desc);
     bool set_block_template(const block& bl, const difficulty_type& diffic, uint64_t height, uint64_t block_reward);
     bool on_block_chain_update();
-    bool start(const account_public_address& adr, size_t threads_count, bool do_background = false, bool ignore_battery = false);
+    bool start(const account_public_address& adr, const crypto::secret_key& sec_key, size_t threads_count, bool do_background = false, bool ignore_battery = false);
     uint64_t get_speed() const;
     uint32_t get_threads_count() const;
     void send_stop_signal();
     bool stop();
     bool is_mining() const;
     const account_public_address& get_mining_address() const;
+    const crypto::secret_key& get_mining_sec_key() const;
     bool on_idle();
     void on_synchronized();
     //synchronous analog (for fast calls)
@@ -137,6 +147,7 @@ namespace cryptonote
     i_miner_handler* m_phandler;
     get_block_hash_t m_gbh;
     account_public_address m_mine_address;
+    crypto::secret_key m_mine_sec_key;//pop-mining
     epee::math_helper::once_a_time_seconds<5> m_update_block_template_interval;
     epee::math_helper::once_a_time_seconds<2> m_update_merge_hr_interval;
     epee::math_helper::once_a_time_seconds<1> m_autodetect_interval;
