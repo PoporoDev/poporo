@@ -3398,7 +3398,7 @@ Input %llu/%llu (%s): amount=%s</source>
  ask-password &lt;0|1|2   (or never|action|decrypt)&gt;
    action: ask the password before many actions such as transfer, etc
    decrypt: same as action, but keeps the spend key encrypted in memory when not needed
- unit &poporo|milliporo|microporo|nanoporo|picoporo&gt;
+ unit &lt;poporo|milliporo|microporo|nanoporo|picoporo&gt;
    Set the default monero (sub-)unit.
  min-outputs-count [n]
    Try to keep at least that many outputs of value at least min-outputs-value.
