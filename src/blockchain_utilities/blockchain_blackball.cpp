@@ -134,9 +134,9 @@ static bool parse_db_sync_mode(std::string db_sync_mode)
 static std::string get_default_db_path()
 {
   boost::filesystem::path dir = tools::get_default_data_dir();
-  // remove .bitmonero, replace with .shared-ringdb
+  // remove .bitpoporo, replace with .ppr-shared-ringdb
   dir = dir.remove_filename();
-  dir /= ".shared-ringdb";
+  dir /= ".ppr-shared-ringdb";
   return dir.string();
 }
 
@@ -1228,7 +1228,7 @@ int main(int argc, char* argv[])
 
   if (command_line::get_arg(vm, command_line::arg_help))
   {
-    std::cout << "Monero '" << MONERO_RELEASE_NAME << "' (v" << MONERO_VERSION_FULL << ")" << ENDL << ENDL;
+    std::cout << "Poporo '" << MONERO_RELEASE_NAME << "' (v" << MONERO_VERSION_FULL << ")" << ENDL << ENDL;
     std::cout << desc_options << std::endl;
     return 1;
   }

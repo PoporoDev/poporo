@@ -208,13 +208,13 @@ class MoneroNode(object):
                     break
                 s.close()
             if all_open:
-                self.log.info('monerod and walletRPC is ready')
+                self.log.info('poporod and walletRPC is ready')
                 break
 
         if not all_open:
             self.log.info('Failed to start wallet or daemon')
             self.stop()
-            raise Exception("monero nodes not start")
+            raise Exception("poporo nodes not start")
 
         self.daemon = Daemon(port=self.ports[0],rpctimeout=self.rpctimeout)
         for i,p in enumerate(self.ports[1:]):
