@@ -1,0 +1,127 @@
+# Multistage docker build, requires docker 17.05
+
+# builder stage
+FROM ubuntu:16.04 as builder
+
+RUN set -ex \
+    && apt-get update \
+    && apt-get --no-install-recommends --yes install \
+        ca-certificates \
+        cmake \
+        g++ \
+        make \
+        pkg-config \
+        graphviz \
+        doxygen \
+        git \
+        curl \
+        libtool-bin \
+        autoconf \
+        automake \
+        bzip2 \
+        xsltproc \
+        gperf \
+        unzip \
+    && apt-get --no-install-recommends --yes install build-essential cmake pkg-config libboost-all-dev libssl-dev libzmq3-dev libunbound-dev libsodium-dev libunwind8-dev liblzma-dev libreadline6-dev libldns-dev libexpat1-dev doxygen graphviz libpgm-dev qttools5-dev-tools libhidapi-dev libusb-dev libprotobuf-dev protobuf-compiler
+
+#ENV CFLAGS='-fPIC'
+#ENV CXXFLAGS='-fPIC'
+
+WORKDIR /src
+COPY . .
+
+ENV USE_SINGLE_BUILDDIR=1
+ARG NPROC
+RUN set -ex && \
+    git submodule init && git submodule update && \
+    rm -rf build && \
+    if [ -z "$NPROC" ] ; \
+    then make -j$(nproc) ; \
+    else make -j$NPROC ; \
+    fi
+
+#WORKDIR /src
+#COPY . .
+#build bitcoin-poporo
+RUN set -ex && \
+    apt-get update && \
+    apt-get --no-install-recommends --yes install \
+    build-essential \
+    libtool \
+    autotools-dev \
+    bsdmainutils \
+    python3 \
+    libssl-dev \
+    libevent-dev \
+    libboost-system-dev \
+    libboost-filesystem-dev \
+    libboost-chrono-dev \
+    libboost-test-dev \
+    libboost-thread-dev \
+    libminiupnpc-dev \
+    libzmq3-dev \
+    software-properties-common && \
+    add-apt-repository ppa:bitcoin/bitcoin && \
+    apt-get update && \
+    apt-get --no-install-recommends --yes install libdb4.8-dev libdb4.8++-dev
+
+ENV USE_SINGLE_BUILDDIR=1
+ARG NPROC
+RUN set -ex && \
+    cd /src/bitcoin-poporo && \
+    sh ./autogen.sh &&\
+    ./configure --without-gui --disable-tests &&\
+    make -j$(nproc) &&\
+    cd /src &&\
+    mkdir -p /src/so-files && \
+    chmod +x ./catch_so.pl && \
+    ldd /src/bitcoin-poporo/src/bitcoind | ./catch_so.pl /src/so-files && \
+    ldd /src/bitcoin-poporo/src/bitcoin-cli | ./catch_so.pl /src/so-files && \
+    ldd /src/build/release/bin/poporod | ./catch_so.pl /src/so-files && \
+    ldd /src/build/release/bin/poporo-wallet-cli | ./catch_so.pl /src/so-files && \
+    ldd /src/build/release/bin/poporo-wallet-rpc | ./catch_so.pl /src/so-files 
+    
+# runtime stage
+FROM ubuntu:16.04
+
+RUN set -ex && \
+    apt-get update && \
+    apt-get --no-install-recommends --yes install ca-certificates && \
+    apt-get clean && \
+    echo "/root/so-files" >> /etc/ld.so.conf.d/my_so.conf && \
+    cd /etc/init.d/ && \
+    echo "#!/bin/bash" >> my-bootscript.sh && \
+    echo "ldconfig" >> my-bootscript.sh && chmod +x my-bootscript.sh && \
+    update-rc.d my-bootscript.sh defaults && \
+    cd /root && \
+    echo "bitcoind -datadir=/root/.bitcoin -daemon -rpcuser=user -rpcpassword=pwd" >> startbitcoin.sh && \
+    echo "poporod --data-dir=/root/.bitpoporo --detach --btc-rpc-ip=127.0.0.1 --btc-rpc-port=8332 --btc-rpc-login=user:pwd" >> startpoporod.sh && \
+    echo "nohup poporo-wallet-rpc --rpc-bind-port=18087 --wallet-dir=/root/wallet --non-interactive --disable-rpc-login &" >> startpoporowalletrpc.sh && \
+    echo "./startbitcoin.sh && sleep 20 && ./startpoporod.sh && ./startpoporowalletrpc.sh && echo finish" >> onestart.sh && \
+    chmod +x *.sh
+    
+COPY --from=builder /src/build/release/bin /usr/local/bin/
+COPY --from=builder /src/bitcoin-poporo/src/bitcoind /usr/local/bin/
+COPY --from=builder /src/bitcoin-poporo/src/bitcoin-cli /usr/local/bin/
+COPY --from=builder /src/so-files /root/so-files
+
+# Contains the blockchain
+VOLUME /root/.bitpoporo
+VOLUME /root/wallet
+VOLUME /root/.bitcoin
+
+#bitcoin rpc port and node port
+EXPOSE 8332
+EXPOSE 8333
+
+#poporod port
+EXPOSE 18080
+EXPOSE 18081
+#wallet-rpc
+EXPOSE 18087
+
+
+#ENTRYPOINT ["poporod", "--p2p-bind-ip=0.0.0.0", "--p2p-bind-port=18080", "--rpc-bind-ip=0.0.0.0", "--rpc-bind-port=18081", "--non-interactive", "--confirm-external-bind", "--btc-rpc-ip=127.0.0.1", "--btc-rpc-port=8332", "--btc-rpc-login=user:pwd"]
+
+ENTRYPOINT ["/bin/bash"]
+

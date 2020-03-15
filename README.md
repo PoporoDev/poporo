@@ -220,7 +220,7 @@ invokes cmake commands as needed.
 
     ```bash
     cd monero
-    git checkout release-v0.15
+    git checkout release-v0.16
     make
     ```
 
